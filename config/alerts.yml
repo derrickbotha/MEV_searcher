@@ -1,0 +1,73 @@
+groups:
+  - name: mev_searcher_alerts
+    interval: 30s
+    rules:
+      # High failed gas burn alert
+      - alert: HighFailedGasBurn
+        expr: rate(failed_gas_burn_wei[5m]) > 1e18
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High failed gas burn detected"
+          description: "Failed gas burn rate is {{ $value }} wei over 5 minutes (threshold: 1 ETH)"
+
+      # Simulation failure spike
+      - alert: SimulationFailureSpike
+        expr: rate(simulation_failures_total[1m]) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High simulation failure rate"
+          description: "Simulation failure rate is {{ $value }} per second"
+
+      # Low bundle inclusion rate
+      - alert: LowInclusionRate
+        expr: rate(bundles_included_total[10m]) / rate(bundles_submitted_total[10m]) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low bundle inclusion rate"
+          description: "Bundle inclusion rate is {{ $value }} (threshold: 30%)"
+
+      # RPC connection issues
+      - alert: RPCConnectionDown
+        expr: up{job="mev-searcher"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MEV Searcher is down"
+          description: "MEV Searcher has been down for more than 1 minute"
+
+      # High latency
+      - alert: HighBundleSubmissionLatency
+        expr: histogram_quantile(0.99, rate(bundle_submission_latency_ms_bucket[5m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High bundle submission latency"
+          description: "P99 bundle submission latency is {{ $value }}ms (threshold: 100ms)"
+
+      # Memory usage
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes / 1024 / 1024 / 1024 > 6
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value }}GB (threshold: 6GB)"
+
+      # No profitable opportunities
+      - alert: NoProfitableOpportunities
+        expr: rate(opportunities_detected_total[30m]) == 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "No profitable opportunities detected"
+          description: "No opportunities have been detected in the last 30 minutes"

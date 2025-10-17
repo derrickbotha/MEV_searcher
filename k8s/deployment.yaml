@@ -1,0 +1,238 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mev-searcher
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mev-secrets
+  namespace: mev-searcher
+type: Opaque
+stringData:
+  mainnet-rpc-url: "YOUR_MAINNET_RPC_URL"
+  mainnet-rpc-ws: "YOUR_MAINNET_RPC_WS"
+  flashbots-auth-key: "YOUR_FLASHBOTS_AUTH_KEY"
+  searcher-private-key: "YOUR_SEARCHER_PRIVATE_KEY"
+  bundle-signer-key: "YOUR_BUNDLE_SIGNER_KEY"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mev-config
+  namespace: mev-searcher
+data:
+  LOG_LEVEL: "info"
+  MIN_PROFIT_THRESHOLD_USD: "10"
+  MAX_GAS_PRICE_GWEI: "300"
+  SIMULATION_ONLY: "false"
+  ENABLE_ETHICAL_GUARDRAILS: "true"
+  MAX_PENDING_TX_QUEUE_SIZE: "10000"
+  MAX_CONCURRENT_SIMULATIONS: "10"
+  SIMULATION_TIMEOUT_MS: "5000"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mev-searcher
+  namespace: mev-searcher
+  labels:
+    app: mev-searcher
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: mev-searcher
+  template:
+    metadata:
+      labels:
+        app: mev-searcher
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: mev-searcher
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: searcher
+        image: mev-searcher:latest
+        imagePullPolicy: Always
+        ports:
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: MAINNET_RPC_URL
+          valueFrom:
+            secretKeyRef:
+              name: mev-secrets
+              key: mainnet-rpc-url
+        - name: MAINNET_RPC_WS
+          valueFrom:
+            secretKeyRef:
+              name: mev-secrets
+              key: mainnet-rpc-ws
+        - name: FLASHBOTS_AUTH_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mev-secrets
+              key: flashbots-auth-key
+        - name: SEARCHER_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mev-secrets
+              key: searcher-private-key
+        - name: BUNDLE_SIGNER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mev-secrets
+              key: bundle-signer-key
+        envFrom:
+        - configMapRef:
+            name: mev-config
+        resources:
+          requests:
+            cpu: "2000m"
+            memory: "4Gi"
+          limits:
+            cpu: "4000m"
+            memory: "8Gi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: health
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: logs
+        emptyDir: {}
+      - name: data
+        persistentVolumeClaim:
+          claimName: mev-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mev-searcher
+  namespace: mev-searcher
+  labels:
+    app: mev-searcher
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 9090
+    targetPort: metrics
+    protocol: TCP
+  - name: health
+    port: 8080
+    targetPort: health
+    protocol: TCP
+  selector:
+    app: mev-searcher
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mev-searcher
+  namespace: mev-searcher
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mev-data
+  namespace: mev-searcher
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mev-searcher-hpa
+  namespace: mev-searcher
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mev-searcher
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mev-searcher-pdb
+  namespace: mev-searcher
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: mev-searcher

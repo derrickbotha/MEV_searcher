@@ -1,0 +1,159 @@
+version: '3.8'
+
+services:
+  # MEV Searcher Bot
+  mev-searcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mev-searcher
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - MAINNET_RPC_URL=${MAINNET_RPC_URL}
+      - MAINNET_RPC_WS=${MAINNET_RPC_WS}
+      - BACKUP_RPC_URL=${BACKUP_RPC_URL}
+      - BACKUP_RPC_WS=${BACKUP_RPC_WS}
+      - FLASHBOTS_RELAY_URL=${FLASHBOTS_RELAY_URL}
+      - FLASHBOTS_AUTH_KEY=${FLASHBOTS_AUTH_KEY}
+      - SEARCHER_PRIVATE_KEY=${SEARCHER_PRIVATE_KEY}
+      - BUNDLE_SIGNER_KEY=${BUNDLE_SIGNER_KEY}
+      - MIN_PROFIT_THRESHOLD_USD=${MIN_PROFIT_THRESHOLD_USD:-10}
+      - MAX_GAS_PRICE_GWEI=${MAX_GAS_PRICE_GWEI:-300}
+      - SIMULATION_ONLY=${SIMULATION_ONLY:-false}
+      - ENABLE_ETHICAL_GUARDRAILS=${ENABLE_ETHICAL_GUARDRAILS:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://mev:mev_password@postgres:5432/mev_searcher
+    ports:
+      - "9090:9090"  # Prometheus metrics
+      - "8080:8080"  # Health checks
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      - redis
+      - postgres
+      - anvil
+    networks:
+      - mev-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+  # Local Anvil Fork for Simulation
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    container_name: anvil-fork
+    restart: unless-stopped
+    command: >
+      anvil
+      --fork-url ${MAINNET_RPC_URL}
+      --fork-block-number latest
+      --host 0.0.0.0
+      --port 8545
+      --silent
+      --accounts 10
+      --balance 10000
+    ports:
+      - "8545:8545"
+    networks:
+      - mev-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  # Redis for caching and state management
+  redis:
+    image: redis:7-alpine
+    container_name: mev-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - mev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL for historical data and analytics
+  postgres:
+    image: postgres:15-alpine
+    container_name: mev-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=mev
+      - POSTGRES_PASSWORD=mev_password
+      - POSTGRES_DB=mev_searcher
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - mev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mev-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - mev-network
+    depends_on:
+      - mev-searcher
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mev-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - mev-network
+    depends_on:
+      - prometheus
+
+networks:
+  mev-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
