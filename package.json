@@ -17,7 +17,21 @@
     "format": "prettier --write src/**/*.ts",
     "start": "node dist/index.js",
     "docker:build": "docker build -t mev-searcher:latest .",
-    "docker:compose": "docker-compose up -d"
+    "docker:build:debug": "docker build -t mev-searcher:debug --target debug .",
+    "docker:run": "docker run -p 8080:8080 -p 9090:9090 mev-searcher:latest",
+    "docker:compose": "docker-compose up -d",
+    "docker:compose:prod": "docker-compose -f docker-compose.prod.yml up -d",
+    "docker:compose:down": "docker-compose -f docker-compose.prod.yml down",
+    "docker:compose:logs": "docker-compose -f docker-compose.prod.yml logs -f",
+    "prod:build": "docker build -t mev-searcher:latest --target production .",
+    "prod:deploy": "npm run prod:build && npm run docker:compose:prod",
+    "prod:stop": "npm run docker:compose:down",
+    "prod:logs": "npm run docker:compose:logs",
+    "prod:health": "curl -f http://localhost:8080/health",
+    "prod:metrics": "curl -f http://localhost:9090/metrics",
+    "security:scan": "docker run --rm -v \"$(pwd):/scan\" aquasec/trivy filesystem /scan",
+    "security:audit": "npm audit --audit-level high",
+    "benchmark:full": "npm run benchmark:cpp && npm run test:perf"
   },
   "keywords": [
     "mev",
