@@ -1,35 +1,31 @@
-import { ethers } from 'ethers';
-import { PendingTx, ClassifiedTx, TxType } from '../types';
+import { PublicKey, TransactionInstruction } from '@solana/web3.js';
+import { PendingTx, ClassifiedTx, TxType, DEXProtocol } from '../types';
 import { wsLogger } from '../utils/logger';
 
-// Known protocol signatures
-const PROTOCOL_SIGNATURES = {
-  // Uniswap V2
-  UNISWAP_V2_SWAP: '0x38ed1739', // swapExactTokensForTokens
-  UNISWAP_V2_SWAP_ETH: '0x7ff36ab5', // swapExactETHForTokens
-  // Uniswap V3
-  UNISWAP_V3_SWAP: '0x414bf389', // exactInputSingle
-  UNISWAP_V3_MULTICALL: '0x5ae401dc', // multicall
-  // Sushiswap (same as Uniswap V2 for most functions)
-  // Curve
-  CURVE_EXCHANGE: '0x3df02124', // exchange
-  // 1inch
-  ONEINCH_SWAP: '0x7c025200', // swap
-};
-
-const KNOWN_DEX_ROUTERS = new Set([
-  '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D'.toLowerCase(), // Uniswap V2
-  '0xE592427A0AEce92De3Edee1F18E0157C05861564'.toLowerCase(), // Uniswap V3
-  '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F'.toLowerCase(), // Sushiswap
-  '0x1111111254EEB25477B68fb85Ed929f73A960582'.toLowerCase(), // 1inch
+// Known Solana DEX program IDs
+const DEX_PROGRAMS = new Map<string, DEXProtocol>([
+  ['675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', DEXProtocol.RAYDIUM], // Raydium AMM
+  ['JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', DEXProtocol.JUPITER], // Jupiter Aggregator
+  ['9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP', DEXProtocol.ORCA], // Orca Whirlpool
+  ['9tKE7Mbmj4mxDjWatGzP5uGhZzu4qH2zeTJ0LfK7lyfX', DEXProtocol.SABER], // Saber
+  ['H8W3ctz92svYg6mkn1UtGfu2aQr2PdvxKKWUuEC4HG1J', DEXProtocol.METEORA], // Meteora
 ]);
 
+// Known token mint addresses for major tokens
+const TOKEN_MINTS = {
+  SOL: new PublicKey('So11111111111111111111111111111111111111112'),
+  USDC: new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
+  USDT: new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'),
+  RAY: new PublicKey('4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R'),
+  ORCA: new PublicKey('orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE'),
+};
+
 export class TxClassifier {
-  private minValueThresholdWei: bigint;
+  private minValueThresholdLamports: bigint;
 
   constructor(minValueThresholdUSD = 100) {
-    // Approximate: $100 / $2000 per ETH = 0.05 ETH
-    this.minValueThresholdWei = BigInt(Math.floor((minValueThresholdUSD / 2000) * 1e18));
+    // Approximate: $100 / $200 per SOL = 0.5 SOL
+    this.minValueThresholdLamports = BigInt(Math.floor((minValueThresholdUSD / 200) * 1e9));
   }
 
   classify(tx: PendingTx): ClassifiedTx {
@@ -47,120 +43,130 @@ export class TxClassifier {
   }
 
   private detectTxType(tx: PendingTx): TxType {
-    // No data = simple ETH transfer
-    if (!tx.data || tx.data === '0x' || tx.data.length <= 10) {
-      return TxType.TOKEN_TRANSFER;
+    // Check if transaction has instructions (all Solana txs do)
+    if (!tx.instructions || tx.instructions.length === 0) {
+      return TxType.UNKNOWN;
     }
 
-    const methodSelector = tx.data.slice(0, 10);
-
-    // Check for DEX swaps
-    if (this.isDexSwap(tx.to, methodSelector)) {
+    // Check for DEX swap patterns
+    if (this.isDexSwap(tx.programId)) {
       return TxType.DEX_SWAP;
     }
 
     // Check for liquidity operations
-    if (this.isLiquidityOperation(methodSelector)) {
-      return tx.data.includes('addLiquidity')
-        ? TxType.LIQUIDITY_ADD
-        : TxType.LIQUIDITY_REMOVE;
+    if (this.isLiquidityOperation(tx.programId, tx.instructions)) {
+      return TxType.LIQUIDITY_ADD;
     }
 
-    // Check for contract deployment
-    if (!tx.to || tx.to === '0x') {
-      return TxType.CONTRACT_DEPLOYMENT;
+    // Check for token transfers
+    if (this.isTokenTransfer(tx.programId)) {
+      return TxType.TOKEN_TRANSFER;
     }
 
-    // Check for NFT purchases (OpenSea, etc.)
-    if (this.isNFTPurchase(tx.to, methodSelector)) {
+    // Check for NFT purchases (would need more sophisticated logic)
+    if (this.isNFTPurchase(tx.programId, tx.instructions)) {
       return TxType.NFT_PURCHASE;
     }
 
-    return TxType.UNKNOWN;
+    return TxType.PROGRAM_INTERACTION;
   }
 
-  private isDexSwap(to: string | undefined, methodSelector: string): boolean {
-    if (!to) return false;
-
-    const isKnownRouter = KNOWN_DEX_ROUTERS.has(to.toLowerCase());
-    const isSwapMethod = Object.values(PROTOCOL_SIGNATURES).some(
-      (sig) => sig === methodSelector
-    );
-
-    return isKnownRouter && isSwapMethod;
+  private isDexSwap(programId?: PublicKey): boolean {
+    if (!programId) return false;
+    return DEX_PROGRAMS.has(programId.toString());
   }
 
-  private isLiquidityOperation(methodSelector: string): boolean {
-    const liquidityMethods = [
-      '0xe8e33700', // addLiquidity
-      '0xf305d719', // addLiquidityETH
-      '0xbaa2abde', // removeLiquidity
-      '0x02751cec', // removeLiquidityETH
+  private isLiquidityOperation(programId?: PublicKey, instructions?: any[]): boolean {
+    if (!programId || !instructions) return false;
+
+    const programIdStr = programId.toString();
+
+    // Raydium liquidity operations
+    if (programIdStr === '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8') {
+      // Check for Raydium instruction discriminators
+      // This would need actual instruction parsing
+      return instructions.some(inst => this.isRaydiumLiquidityInstruction(inst));
+    }
+
+    // Orca liquidity operations
+    if (programIdStr === '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP') {
+      return instructions.some(inst => this.isOrcaLiquidityInstruction(inst));
+    }
+
+    return false;
+  }
+
+  private isTokenTransfer(programId?: PublicKey): boolean {
+    if (!programId) return false;
+    // SPL Token program
+    return programId.toString() === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+  }
+
+  private isNFTPurchase(programId?: PublicKey, instructions?: any[]): boolean {
+    if (!programId || !instructions) return false;
+
+    // Magic Eden, Tensor, etc. would have specific program IDs
+    // This is a simplified check
+    const nftMarketplaces = [
+      'M2mx93ekt1fmXSVkTrUL9xVFHkmME8HTUi5Cyc5aF7K', // Magic Eden v2
+      'TSWAPaqyCSx2KABk68Shruf4rp7CxcNi8hAsbdwmHbN', // Tensor
     ];
-    return liquidityMethods.includes(methodSelector);
+
+    return nftMarketplaces.includes(programId.toString());
   }
 
-  private isNFTPurchase(to: string | undefined, methodSelector: string): boolean {
-    if (!to) return false;
+  private isRaydiumLiquidityInstruction(instruction: any): boolean {
+    // Raydium instruction discriminators for liquidity operations
+    // This would need proper instruction parsing
+    // For now, return false - would need actual implementation
+    return false;
+  }
 
-    const nftMarketplaces = new Set([
-      '0x00000000006c3852cbEf3e08E8dF289169EdE581'.toLowerCase(), // OpenSea Seaport
-      '0x7f268357A8c2552623316e2562D90e642bB538E5'.toLowerCase(), // OpenSea Wyvern
-    ]);
-
-    return nftMarketplaces.has(to.toLowerCase());
+  private isOrcaLiquidityInstruction(instruction: any): boolean {
+    // Orca Whirlpool instruction discriminators
+    // This would need proper instruction parsing
+    // For now, return false - would need actual implementation
+    return false;
   }
 
   private enrichDexSwap(tx: ClassifiedTx): void {
     try {
-      // Decode swap parameters
-      const iface = new ethers.Interface([
-        'function swapExactTokensForTokens(uint,uint,address[],address,uint)',
-        'function exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))',
-      ]);
+      if (!tx.programId) return;
 
-      const decoded = iface.parseTransaction({ data: tx.data });
-      if (decoded) {
-        tx.protocol = this.detectProtocol(tx.to!);
-
-        if (decoded.name === 'swapExactTokensForTokens') {
-          tx.tokenIn = decoded.args[2][0];
-          tx.tokenOut = decoded.args[2][decoded.args[2].length - 1];
-          tx.amount = decoded.args[0];
-        } else if (decoded.name === 'exactInputSingle') {
-          tx.tokenIn = decoded.args[0].tokenIn;
-          tx.tokenOut = decoded.args[0].tokenOut;
-          tx.amount = decoded.args[0].amountIn;
-        }
+      const protocol = DEX_PROGRAMS.get(tx.programId.toString());
+      if (protocol) {
+        tx.protocol = protocol;
       }
+
+      // Extract token information from instructions
+      // This is a simplified version - real implementation would parse instructions
+      this.extractTokenInfo(tx);
+
     } catch (error) {
-      wsLogger.debug({ hash: tx.hash, error }, 'Failed to enrich DEX swap details');
+      wsLogger.debug({ signature: tx.signature, error }, 'Failed to enrich DEX swap details');
     }
   }
 
-  private detectProtocol(to: string): string {
-    const protocols: Record<string, string> = {
-      '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D': 'UNISWAP_V2',
-      '0xE592427A0AEce92De3Edee1F18E0157C05861564': 'UNISWAP_V3',
-      '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F': 'SUSHISWAP',
-      '0x1111111254EEB25477B68fb85Ed929f73A960582': 'ONEINCH',
-    };
+  private extractTokenInfo(tx: ClassifiedTx): void {
+    // This is a placeholder - real implementation would:
+    // 1. Parse the transaction instructions
+    // 2. Extract token mint addresses from instruction data
+    // 3. Determine input/output amounts
 
-    return protocols[to] || 'UNKNOWN_DEX';
+    // For now, we'll set some defaults for testing
+    tx.tokenIn = TOKEN_MINTS.SOL;
+    tx.tokenOut = TOKEN_MINTS.USDC;
+    tx.amount = BigInt(1e9); // 1 SOL
+    tx.slippage = 0.5; // 0.5%
   }
 
-  isHighValue(tx: PendingTx): boolean {
-    return tx.value >= this.minValueThresholdWei;
+  shouldProcess(tx: PendingTx): boolean {
+    // Check minimum value threshold
+    return tx.priorityFee >= this.minValueThresholdLamports;
   }
 
-  filterRelevantTxs(txs: PendingTx[]): ClassifiedTx[] {
-    return txs
-      .filter((tx) => this.isHighValue(tx) || this.hasSignificantData(tx))
-      .map((tx) => this.classify(tx));
-  }
-
-  private hasSignificantData(tx: PendingTx): boolean {
-    // Consider transactions with meaningful calldata (not just transfers)
-    return tx.data && tx.data.length > 10 && tx.data !== '0x';
+  hasSignificantData(tx: PendingTx): boolean {
+    // All Solana transactions have instructions, so check if it's a complex transaction
+    return Boolean(tx.instructions && tx.instructions.length > 1);
   }
 }

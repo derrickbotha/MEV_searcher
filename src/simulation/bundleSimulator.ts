@@ -1,4 +1,4 @@
-import { ethers } from 'ethers';
+import { Connection, Transaction, VersionedTransaction, PublicKey, Keypair } from '@solana/web3.js';
 import { Bundle, ProfitEstimate, ForkHandle } from '../types';
 import { LocalForkManager } from './localForkManager';
 import { simLogger } from '../utils/logger';
@@ -7,23 +7,43 @@ export interface SimulationResult {
   success: boolean;
   profit?: ProfitEstimate;
   error?: string;
-  gasUsed?: bigint;
+  computeUnitsUsed?: number;
   revertReason?: string;
+  logs?: string[];
 }
 
+/**
+ * Solana Bundle Simulator
+ * 
+ * Simulates transaction bundles on Solana to:
+ * - Estimate profit before submission
+ * - Validate transaction execution
+ * - Calculate compute units and fees
+ * - Detect potential failures
+ */
 export class BundleSimulator {
   private forkManager: LocalForkManager;
+  private connection: Connection;
   private maxConcurrency: number;
   private timeoutMs: number;
 
-  constructor(forkManager: LocalForkManager, maxConcurrency = 10, timeoutMs = 5000) {
+  constructor(
+    forkManager: LocalForkManager,
+    connection: Connection,
+    maxConcurrency = 10,
+    timeoutMs = 5000
+  ) {
     this.forkManager = forkManager;
+    this.connection = connection;
     this.maxConcurrency = maxConcurrency;
     this.timeoutMs = timeoutMs;
   }
 
+  /**
+   * Simulate a single bundle on a Solana fork
+   */
   async simulate(bundle: Bundle, fork?: ForkHandle): Promise<SimulationResult> {
-    const useFork = fork || (await this.forkManager.createFreshFork(bundle.blockNumber));
+    const useFork = fork || (await this.forkManager.createFreshFork(bundle.slot));
 
     try {
       return await this.simulateWithTimeout(bundle, useFork);
@@ -49,88 +69,104 @@ export class BundleSimulator {
     }));
   }
 
+  /**
+   * Core simulation logic for Solana bundles
+   */
   private async simulateBundle(bundle: Bundle, fork: ForkHandle): Promise<SimulationResult> {
     try {
-      let totalGasUsed = BigInt(0);
+      let totalComputeUnits = 0;
       let balanceBefore = BigInt(0);
       let balanceAfter = BigInt(0);
+      const allLogs: string[] = [];
 
-      // Get searcher address from first transaction
-      const firstTx = await fork.provider.parseTransaction(bundle.txs[0]);
-      if (!firstTx || !firstTx.from) {
+      // Extract payer/searcher address from first transaction
+      const firstTx = bundle.transactions[0];
+      if (!firstTx) {
         return {
           success: false,
-          error: 'Invalid transaction format',
+          error: 'Empty bundle',
         };
       }
 
-      const searcherAddress = firstTx.from;
-      balanceBefore = await fork.provider.getBalance(searcherAddress);
-
-      // Simulate each transaction in the bundle
-      for (const signedTx of bundle.txs) {
-        const tx = await fork.provider.parseTransaction(signedTx);
-        if (!tx) {
-          return {
-            success: false,
-            error: 'Failed to parse transaction',
-          };
-        }
-
-        // Send transaction to fork
-        const txResponse = await fork.provider.broadcastTransaction(signedTx);
-        const receipt = await txResponse.wait();
-
-        if (!receipt) {
-          return {
-            success: false,
-            error: 'Transaction receipt not found',
-          };
-        }
-
-        if (receipt.status === 0) {
-          return {
-            success: false,
-            error: 'Transaction reverted',
-            revertReason: await this.getRevertReason(fork.provider, tx),
-          };
-        }
-
-        totalGasUsed += receipt.gasUsed;
+      const searcherPubkey = this.extractPayer(firstTx);
+      if (!searcherPubkey) {
+        return {
+          success: false,
+          error: 'Could not extract payer from transaction',
+        };
       }
 
-      balanceAfter = await fork.provider.getBalance(searcherAddress);
+      // Get balance before simulation
+      balanceBefore = BigInt(await fork.connection.getBalance(searcherPubkey));
+
+      // Simulate each transaction in the bundle
+      for (let i = 0; i < bundle.transactions.length; i++) {
+        const tx = bundle.transactions[i];
+
+        simLogger.debug(
+          { txIndex: i, totalTxs: bundle.transactions.length },
+          'Simulating transaction'
+        );
+
+        // Simulate transaction
+        const simulation = await this.simulateTransaction(tx, fork);
+
+        if (simulation.err) {
+          return {
+            success: false,
+            error: `Transaction ${i} failed: ${JSON.stringify(simulation.err)}`,
+            revertReason: this.extractRevertReason(simulation.err),
+            logs: simulation.logs || [],
+          };
+        }
+
+        // Accumulate compute units
+        if (simulation.unitsConsumed) {
+          totalComputeUnits += simulation.unitsConsumed;
+        }
+
+        // Accumulate logs
+        if (simulation.logs) {
+          allLogs.push(...simulation.logs);
+        }
+      }
+
+      // Get balance after simulation
+      balanceAfter = BigInt(await fork.connection.getBalance(searcherPubkey));
 
       // Calculate profit
       const netProfit = balanceAfter - balanceBefore;
-      const gasPrice = bundle.txs[0] ? await this.extractGasPrice(bundle.txs[0]) : BigInt(0);
-      const gasCost = totalGasUsed * gasPrice;
+      
+      // Estimate priority fees based on compute units
+      const priorityFeePerCU = 100; // microlamports per compute unit (adjustable)
+      const priorityFeeLamports = BigInt(totalComputeUnits * priorityFeePerCU);
 
       const profit: ProfitEstimate = {
-        grossProfitWei: netProfit + gasCost,
-        gasCostWei: gasCost,
-        netProfitWei: netProfit,
-        netProfitUSD: this.weiToUSD(netProfit),
-        gasPrice,
+        grossProfitLamports: netProfit + priorityFeeLamports,
+        priorityFeeLamports,
+        netProfitLamports: netProfit,
+        netProfitUSD: this.lamportsToUSD(netProfit),
+        priorityFeePerCU,
       };
 
-      simLogger.debug(
+      simLogger.info(
         {
-          bundleSize: bundle.txs.length,
-          netProfitWei: profit.netProfitWei.toString(),
+          bundleSize: bundle.transactions.length,
+          netProfitLamports: profit.netProfitLamports.toString(),
           netProfitUSD: profit.netProfitUSD,
-          gasUsed: totalGasUsed.toString(),
+          computeUnits: totalComputeUnits,
         },
-        'Simulation successful'
+        'Bundle simulation successful'
       );
 
       return {
         success: true,
         profit,
-        gasUsed: totalGasUsed,
+        computeUnitsUsed: totalComputeUnits,
+        logs: allLogs,
       };
     } catch (error: any) {
-      simLogger.error({ error: error.message }, 'Simulation failed');
+      simLogger.error({ error: error.message }, 'Bundle simulation failed');
       return {
         success: false,
         error: error.message,
@@ -138,14 +174,53 @@ export class BundleSimulator {
     }
   }
 
+  /**
+   * Simulate a single transaction
+   */
+  private async simulateTransaction(
+    tx: Transaction | VersionedTransaction,
+    fork: ForkHandle
+  ): Promise<any> {
+    try {
+      if (tx instanceof VersionedTransaction) {
+        const simulation = await fork.connection.simulateTransaction(tx, {
+          sigVerify: false, // Skip signature verification for faster simulation
+          commitment: 'confirmed',
+        });
+        return simulation.value;
+      } else {
+        // For regular Transaction, we need to compile it first
+        const recentBlockhash = await fork.connection.getLatestBlockhash();
+        tx.recentBlockhash = recentBlockhash.blockhash;
+
+        const simulation = await fork.connection.simulateTransaction(tx, undefined, {
+          sigVerify: false,
+          commitment: 'confirmed',
+        });
+        return simulation.value;
+      }
+    } catch (error: any) {
+      simLogger.error({ error: error.message }, 'Transaction simulation error');
+      return {
+        err: error.message,
+        logs: [],
+      };
+    }
+  }
+
+  /**
+   * Simulate multiple bundles in parallel
+   */
   async simulateParallel(
     bundles: Bundle[],
     options: { maxConcurrency?: number; timeoutMs?: number } = {}
   ): Promise<SimulationResult[]> {
     const concurrency = options.maxConcurrency || this.maxConcurrency;
-    const timeout = options.timeoutMs || this.timeoutMs;
 
-    simLogger.info({ bundleCount: bundles.length, concurrency }, 'Starting parallel simulation');
+    simLogger.info(
+      { bundleCount: bundles.length, concurrency },
+      'Starting parallel bundle simulation'
+    );
 
     const results: SimulationResult[] = [];
     const chunks = this.chunkArray(bundles, concurrency);
@@ -157,10 +232,17 @@ export class BundleSimulator {
       results.push(...chunkResults);
     }
 
+    const successful = results.filter((r) => r.success).length;
+    const totalProfit = results
+      .filter((r) => r.success && r.profit)
+      .reduce((sum, r) => sum + r.profit!.netProfitUSD, 0);
+
     simLogger.info(
       {
         total: results.length,
-        successful: results.filter((r) => r.success).length,
+        successful,
+        failed: results.length - successful,
+        totalProfitUSD: totalProfit,
       },
       'Parallel simulation complete'
     );
@@ -168,35 +250,136 @@ export class BundleSimulator {
     return results;
   }
 
-  private async extractGasPrice(signedTx: string): Promise<bigint> {
+  /**
+   * Extract payer (fee payer) from transaction
+   */
+  private extractPayer(tx: Transaction | VersionedTransaction): PublicKey | null {
     try {
-      const tx = ethers.Transaction.from(signedTx);
-      return tx.gasPrice || tx.maxFeePerGas || BigInt(0);
-    } catch {
-      return BigInt(0);
+      if (tx instanceof VersionedTransaction) {
+        // For VersionedTransaction, the first account is the payer
+        const accountKeys = tx.message.staticAccountKeys;
+        return accountKeys.length > 0 ? accountKeys[0] : null;
+      } else {
+        // For regular Transaction, feePayer is set
+        return tx.feePayer || null;
+      }
+    } catch (error) {
+      simLogger.error({ error }, 'Failed to extract payer');
+      return null;
     }
   }
 
-  private async getRevertReason(
-    provider: ethers.JsonRpcProvider,
-    tx: ethers.Transaction
-  ): Promise<string> {
-    try {
-      await provider.call({
-        to: tx.to,
-        data: tx.data,
-        value: tx.value,
-        from: tx.from,
-      });
-      return 'Unknown revert reason';
-    } catch (error: any) {
-      return error.message || 'Transaction reverted';
+  /**
+   * Extract human-readable revert reason from error
+   */
+  private extractRevertReason(err: any): string {
+    if (typeof err === 'string') {
+      return err;
     }
+
+    if (err && typeof err === 'object') {
+      if ('InstructionError' in err) {
+        return `Instruction error: ${JSON.stringify(err.InstructionError)}`;
+      }
+      if ('InsufficientFundsForFee' in err) {
+        return 'Insufficient funds for fee';
+      }
+      if ('InvalidAccountData' in err) {
+        return 'Invalid account data';
+      }
+      if ('AccountInUse' in err) {
+        return 'Account in use';
+      }
+    }
+
+    return JSON.stringify(err);
   }
 
-  private weiToUSD(wei: bigint, ethPriceUSD = 2000): number {
-    const eth = Number(wei) / 1e18;
-    return eth * ethPriceUSD;
+  /**
+   * Estimate profit for a bundle without full simulation (fast path)
+   */
+  async estimateProfitFast(bundle: Bundle): Promise<ProfitEstimate> {
+    // Quick estimation without fork simulation
+    // Useful for initial filtering before expensive simulation
+
+    const estimatedComputeUnits = bundle.transactions.length * 100000; // 100k CU per tx estimate
+    const priorityFeePerCU = 100; // microlamports
+    const priorityFeeLamports = BigInt(estimatedComputeUnits * priorityFeePerCU);
+
+    // Estimate gross profit based on bundle type
+    // This would be more sophisticated in production
+    const estimatedGrossProfitLamports = BigInt(50000000); // 0.05 SOL estimate
+
+    const netProfitLamports = estimatedGrossProfitLamports - priorityFeeLamports;
+
+    return {
+      grossProfitLamports: estimatedGrossProfitLamports,
+      priorityFeeLamports,
+      netProfitLamports,
+      netProfitUSD: this.lamportsToUSD(netProfitLamports),
+      priorityFeePerCU,
+    };
+  }
+
+  /**
+   * Validate bundle before simulation
+   */
+  validateBundle(bundle: Bundle): { valid: boolean; error?: string } {
+    if (bundle.transactions.length === 0) {
+      return { valid: false, error: 'Empty bundle' };
+    }
+
+    if (bundle.transactions.length > 5) {
+      return { valid: false, error: 'Bundle too large (max 5 transactions)' };
+    }
+
+    // Check if all transactions are valid
+    for (let i = 0; i < bundle.transactions.length; i++) {
+      const tx = bundle.transactions[i];
+      if (!tx) {
+        return { valid: false, error: `Transaction ${i} is null or undefined` };
+      }
+    }
+
+    // Check slot validity
+    if (bundle.slot <= 0) {
+      return { valid: false, error: 'Invalid slot number' };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Get compute unit estimate for a bundle
+   */
+  async getComputeUnitEstimate(bundle: Bundle): Promise<number> {
+    let totalUnits = 0;
+
+    for (const tx of bundle.transactions) {
+      try {
+        // Simulate individual transaction to get compute units
+        const simulation = await this.simulateTransaction(
+          tx,
+          { connection: this.connection, id: 0, cleanup: async () => {} }
+        );
+
+        if (simulation.unitsConsumed) {
+          totalUnits += simulation.unitsConsumed;
+        } else {
+          // Fallback estimate
+          totalUnits += 100000; // 100k CU per tx
+        }
+      } catch {
+        totalUnits += 100000; // Fallback estimate
+      }
+    }
+
+    return totalUnits;
+  }
+
+  private lamportsToUSD(lamports: bigint, solPriceUSD = 200): number {
+    const sol = Number(lamports) / 1e9;
+    return sol * solPriceUSD;
   }
 
   private chunkArray<T>(array: T[], chunkSize: number): T[][] {
@@ -205,5 +388,31 @@ export class BundleSimulator {
       chunks.push(array.slice(i, i + chunkSize));
     }
     return chunks;
+  }
+
+  /**
+   * Get detailed simulation metrics
+   */
+  async getSimulationMetrics(bundle: Bundle): Promise<{
+    totalComputeUnits: number;
+    avgComputePerTx: number;
+    estimatedPriorityFee: bigint;
+    estimatedExecutionTime: number; // in milliseconds
+  }> {
+    const totalComputeUnits = await this.getComputeUnitEstimate(bundle);
+    const avgComputePerTx = totalComputeUnits / bundle.transactions.length;
+    
+    const priorityFeePerCU = 100; // microlamports
+    const estimatedPriorityFee = BigInt(totalComputeUnits * priorityFeePerCU);
+
+    // Solana processes transactions very fast, estimate based on compute units
+    const estimatedExecutionTime = (totalComputeUnits / 1000000) * 400; // ~400ms per 1M CU
+
+    return {
+      totalComputeUnits,
+      avgComputePerTx,
+      estimatedPriorityFee,
+      estimatedExecutionTime,
+    };
   }
 }

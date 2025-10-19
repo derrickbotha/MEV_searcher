@@ -1,14 +1,15 @@
-// Core types used throughout the application
+// Core types used throughout the Solana MEV searcher application
+
+import { PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
 
 export interface PendingTx {
-  hash: string;
-  from: string;
-  to?: string;
-  data: string;
-  value: bigint;
-  gasPrice: bigint;
-  gasLimit: bigint;
-  nonce: number;
+  signature: string;
+  account: PublicKey;
+  programId?: PublicKey;
+  instructions: any[];
+  computeUnits: number;
+  priorityFee: bigint; // in lamports
+  slot: number;
   timestamp: number;
   priority?: number;
 }
@@ -16,19 +17,21 @@ export interface PendingTx {
 export interface RPCConfig {
   name: string;
   httpUrl: string;
-  wsUrl: string;
+  wsUrl?: string;
   priority: number;
   maxRetries: number;
   timeoutMs: number;
+  commitment?: 'processed' | 'confirmed' | 'finalized';
 }
 
 export interface ClassifiedTx extends PendingTx {
   type: TxType;
   protocol?: string;
-  poolAddress?: string;
-  tokenIn?: string;
-  tokenOut?: string;
+  poolAddress?: PublicKey;
+  tokenIn?: PublicKey;
+  tokenOut?: PublicKey;
   amount?: bigint;
+  slippage?: number;
 }
 
 export enum TxType {
@@ -37,58 +40,68 @@ export enum TxType {
   LIQUIDITY_REMOVE = 'LIQUIDITY_REMOVE',
   NFT_PURCHASE = 'NFT_PURCHASE',
   TOKEN_TRANSFER = 'TOKEN_TRANSFER',
-  CONTRACT_DEPLOYMENT = 'CONTRACT_DEPLOYMENT',
+  PROGRAM_INTERACTION = 'PROGRAM_INTERACTION',
   UNKNOWN = 'UNKNOWN',
+}
+
+export enum DEXProtocol {
+  RAYDIUM = 'RAYDIUM',
+  JUPITER = 'JUPITER',
+  ORCA = 'ORCA',
+  SABER = 'SABER',
+  METEORA = 'METEORA',
 }
 
 export interface Opportunity {
   type: string;
   expectedProfitUSD: number;
-  gasEstimate: bigint;
-  targetBlock: number;
+  computeUnitsEstimate: number;
+  targetSlot: number;
   bundle: Bundle;
   strategy: string;
   confidence: number;
+  priorityFee: bigint;
 }
 
 export interface Bundle {
-  txs: string[];
-  blockNumber: number;
+  transactions: (Transaction | VersionedTransaction)[];
+  slot: number;
   minTimestamp?: number;
   maxTimestamp?: number;
-  revertingTxHashes?: string[];
+  failedTxs?: string[];
 }
 
 export interface SignedBundle extends Bundle {
-  signature: string;
+  signatures: string[];
 }
 
 export interface SubmissionResult {
   success: boolean;
-  bundleHash?: string;
+  bundleId?: string;
   error?: string;
   relay: string;
+  landedSlot?: number;
   inclusionProbability?: number;
 }
 
 export interface ProfitEstimate {
-  grossProfitWei: bigint;
-  gasCostWei: bigint;
-  netProfitWei: bigint;
+  grossProfitLamports: bigint;
+  priorityFeeLamports: bigint;
+  netProfitLamports: bigint;
   netProfitUSD: number;
-  gasPrice: bigint;
+  priorityFeePerCU: number;
 }
 
 export interface ForkHandle {
   id: number;
-  provider: any;
+  connection: any;
   cleanup: () => Promise<void>;
 }
 
 export interface ForkState {
-  blockNumber: number;
+  slot: number;
   timestamp: number;
-  stateRoot: string;
+  blockhash: string;
 }
 
 export interface HealthStatus {
@@ -96,6 +109,7 @@ export interface HealthStatus {
   latencyMs?: number;
   lastChecked: number;
   errorCount: number;
+  slotHeight?: number;
 }
 
 export interface Strategy {
@@ -105,4 +119,31 @@ export interface Strategy {
   detect: (txs: ClassifiedTx[]) => Promise<Opportunity | null>;
   buildBundle: (opportunity: Opportunity) => Promise<Bundle>;
   estimateProfit: (bundle: Bundle, fork: ForkHandle) => Promise<ProfitEstimate>;
+}
+
+export interface PoolInfo {
+  address: PublicKey;
+  protocol: DEXProtocol;
+  tokenA: PublicKey;
+  tokenB: PublicKey;
+  tokenAAccount: PublicKey;
+  tokenBAccount: PublicKey;
+  authority?: PublicKey;
+  feeAccount?: PublicKey;
+  fee: number;
+}
+
+export interface TokenInfo {
+  address: PublicKey;
+  symbol: string;
+  decimals: number;
+  coingeckoId?: string;
+}
+
+export interface MEVConfig {
+  minProfitLamports: bigint;
+  maxPriorityFee: bigint;
+  maxSlippageBps: number;
+  numThreads: number;
+  jitoTipAccount?: PublicKey;
 }

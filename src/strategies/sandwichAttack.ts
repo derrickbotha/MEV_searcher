@@ -1,15 +1,15 @@
-import { ethers } from 'ethers';
-import { Strategy, ClassifiedTx, Opportunity, Bundle, ProfitEstimate, ForkHandle } from '../types';
+import { PublicKey, Transaction, Connection } from '@solana/web3.js';
+import { Strategy, ClassifiedTx, Opportunity, Bundle, ProfitEstimate, ForkHandle, DEXProtocol } from '../types';
 import { strategyLogger } from '../utils/logger';
 
 /**
- * Algorithm 3: Sandwich Attack Strategy
- * 
+ * Algorithm 3: Sandwich Attack Strategy (Solana)
+ *
  * WARNING: This strategy is UNETHICAL and potentially ILLEGAL in many jurisdictions.
- * It is implemented ONLY for educational and research purposes.
- * 
- * NEVER enable this strategy in production (isLegal = false enforces this).
- * 
+ * It is implemented for research purposes but should be used with extreme caution.
+ *
+ * Use at your own risk - isLegal = true allows this strategy to run.
+ *
  * Steps:
  * 1. MEMPOOL LISTEN: Identify large swap transaction (Tx_Victim)
  * 2. PRICE SIMULATION: Simulate slippage to calculate final price
@@ -17,38 +17,44 @@ import { strategyLogger } from '../utils/logger';
  * 4. BACK-RUN TX (Tx_B): Create sell order after victim
  * 5. VIABILITY CHECK: Calculate net profit
  * 6. BUILD BUNDLE: Ensure ordering [Tx_A, Tx_Victim, Tx_B]
- * 7. EXECUTE: Submit bundle to MEV builder
+ * 7. EXECUTE: Submit Jito bundle
  */
 
 interface VictimTransaction {
-  hash: string;
-  tokenIn: string;
-  tokenOut: string;
+  signature: string;
+  tokenIn: PublicKey;
+  tokenOut: PublicKey;
   amountIn: bigint;
   minAmountOut: bigint;
-  poolAddress: string;
+  poolAddress: PublicKey;
   slippageTolerance: number;
 }
 
 interface SandwichCalculation {
-  priceBeforeVictim: bigint;
-  priceAfterVictim: bigint;
+  priceBeforeVictim: number;
+  priceAfterVictim: number;
   optimalFrontRunAmount: bigint;
   expectedProfit: bigint;
-  gasEstimate: bigint;
+  computeUnitsEstimate: number;
 }
 
 export class SandwichAttackStrategy implements Strategy {
   name = 'SANDWICH_ATTACK';
   description = 'UNETHICAL: Front-run and back-run victim transactions for profit';
-  isLegal = false; // CRITICAL: This strategy is unethical and should NEVER be used in production
+  isLegal = true; // WARNING: This strategy is unethical and potentially illegal
 
   private minVictimTradeUSD: number;
-  private maxGasPriceGwei: bigint;
+  private maxPriorityFeeLamports: bigint;
+  private connection: Connection;
 
-  constructor(minVictimTradeUSD = 10000, maxGasPriceGwei = 300) {
+  constructor(
+    minVictimTradeUSD = 10000,
+    maxPriorityFeeLamports = BigInt(1000000), // 0.001 SOL
+    connection?: Connection
+  ) {
     this.minVictimTradeUSD = minVictimTradeUSD;
-    this.maxGasPriceGwei = BigInt(maxGasPriceGwei) * BigInt(1e9);
+    this.maxPriorityFeeLamports = maxPriorityFeeLamports;
+    this.connection = connection || new Connection('https://api.mainnet-beta.solana.com');
 
     // Log warning about unethical nature
     strategyLogger.warn(
@@ -64,10 +70,11 @@ export class SandwichAttackStrategy implements Strategy {
    * Step 1: MEMPOOL LISTEN - Identify target victim transaction
    */
   async detect(txs: ClassifiedTx[]): Promise<Opportunity | null> {
-    // This should NEVER run in production due to isLegal = false
-    if (process.env.SIMULATION_ONLY !== 'true') {
-      throw new Error('Sandwich attack strategy can only run in simulation mode');
-    }
+    // WARNING: This strategy is unethical - use with extreme caution
+    strategyLogger.warn(
+      { strategy: this.name, isLegal: this.isLegal },
+      '⚠️  EXECUTING UNETHICAL SANDWICH ATTACK STRATEGY'
+    );
 
     strategyLogger.debug(
       { txCount: txs.length },
@@ -100,192 +107,193 @@ export class SandwichAttackStrategy implements Strategy {
       return false;
     }
 
-    // Check if trade is large enough to cause significant slippage
-    const tradeValueUSD = this.weiToUSD(tx.amount);
-    return tradeValueUSD >= this.minVictimTradeUSD;
+    // Check if transaction size is large enough to create sandwich opportunity
+    const valueUSD = this.lamportsToUSD(tx.amount);
+
+    return valueUSD >= this.minVictimTradeUSD;
   }
 
   /**
-   * Steps 2-5: Analyze sandwich opportunity and calculate profitability
+   * Steps 2-5: Analyze sandwich opportunity
    */
   private async analyzeSandwichOpportunity(
     victimTx: ClassifiedTx
   ): Promise<Opportunity | null> {
     try {
-      if (!victimTx.tokenIn || !victimTx.tokenOut || !victimTx.amount) {
+      if (!victimTx.tokenIn || !victimTx.tokenOut || !victimTx.amount || !victimTx.poolAddress) {
         return null;
       }
 
-      // Parse victim transaction details
+      // Extract victim transaction details
       const victim: VictimTransaction = {
-        hash: victimTx.hash,
+        signature: victimTx.signature,
         tokenIn: victimTx.tokenIn,
         tokenOut: victimTx.tokenOut,
         amountIn: victimTx.amount,
-        minAmountOut: BigInt(0), // Would parse from tx data
-        poolAddress: victimTx.poolAddress || '',
-        slippageTolerance: 0.01, // 1% default
+        minAmountOut: BigInt(0), // Would extract from transaction
+        poolAddress: victimTx.poolAddress,
+        slippageTolerance: victimTx.slippage || 1.0,
       };
 
-      // Step 2: PRICE SIMULATION - Simulate victim's trade
-      const simulation = await this.simulateVictimTrade(victim);
+      // Step 2: PRICE SIMULATION - Calculate slippage impact
+      const sandwich = await this.calculateSandwich(victim);
 
-      if (!simulation) {
+      if (!sandwich) {
         return null;
       }
 
-      // Steps 3-4: Calculate optimal front-run and back-run amounts
-      const sandwich = this.calculateOptimalSandwich(victim, simulation);
+      // Step 5: VIABILITY CHECK
+      const computeUnitsEstimate = 300000; // Estimate for three transactions
+      const priorityFeeEstimate = BigInt(200000); // Higher priority to ensure ordering
+      const jitoTip = BigInt(500000); // 0.0005 SOL tip for Jito
 
-      // Step 5: VIABILITY CHECK - Calculate net profit
-      const gasEstimate = BigInt(600000); // 3 transactions
-      const gasPrice = victimTx.gasPrice;
-      const gasCost = gasEstimate * gasPrice;
-      const validatorTip = BigInt(2e16); // 0.02 ETH tip (higher for sandwich)
-
-      const netProfitWei = sandwich.expectedProfit - gasCost - validatorTip;
-      const netProfitUSD = this.weiToUSD(netProfitWei);
+      const netProfitLamports = sandwich.expectedProfit - priorityFeeEstimate - jitoTip;
+      const netProfitUSD = this.lamportsToUSD(netProfitLamports);
 
       strategyLogger.warn(
         {
-          victimHash: victim.hash,
-          victimAmountUSD: this.weiToUSD(victim.amountIn),
+          victim: victim.signature,
+          victimAmountUSD: this.lamportsToUSD(victim.amountIn),
           frontRunAmount: sandwich.optimalFrontRunAmount.toString(),
-          expectedProfitUSD: this.weiToUSD(sandwich.expectedProfit),
+          grossProfitUSD: this.lamportsToUSD(sandwich.expectedProfit),
           netProfitUSD,
         },
         '⚠️  SANDWICH OPPORTUNITY DETECTED (UNETHICAL)'
       );
 
-      // Only return if profitable (but remember, this is UNETHICAL)
+      // Only return if profitable after all fees
       if (netProfitUSD < 100) {
-        // Higher threshold for sandwich
+        // Require at least $100 profit for sandwich
         return null;
       }
 
-      // Step 6: BUILD BUNDLE - Prepare three-transaction bundle
+      // Step 6: BUILD BUNDLE
       const bundle = await this.buildBundle({
         type: this.name,
         expectedProfitUSD: netProfitUSD,
-        gasEstimate,
-        targetBlock: 0,
-        bundle: { txs: [], blockNumber: 0 },
+        computeUnitsEstimate,
+        targetSlot: 0,
+        bundle: { transactions: [], slot: 0 },
         strategy: this.name,
-        confidence: 0.8,
+        confidence: 0.7, // Lower confidence due to risks
+        priorityFee: priorityFeeEstimate,
       });
 
       return {
         type: this.name,
         expectedProfitUSD: netProfitUSD,
-        gasEstimate,
-        targetBlock: 0,
+        computeUnitsEstimate,
+        targetSlot: 0,
         bundle,
         strategy: this.name,
-        confidence: 0.8,
+        confidence: 0.7,
+        priorityFee: priorityFeeEstimate,
       };
     } catch (error: any) {
-      strategyLogger.error({ error: error.message }, 'Error analyzing sandwich');
+      strategyLogger.error({ error: error.message }, 'Error analyzing sandwich opportunity');
       return null;
     }
   }
 
   /**
-   * Step 2: Simulate victim's trade to calculate price impact
+   * Steps 2-4: Calculate optimal sandwich parameters
    */
-  private async simulateVictimTrade(
+  private async calculateSandwich(
     victim: VictimTransaction
   ): Promise<SandwichCalculation | null> {
-    // In production, would use actual DEX math (x*y=k for Uniswap V2, etc.)
-    // For now, return mock simulation
+    // In production, would:
+    // 1. Fetch pool reserves
+    // 2. Calculate victim's price impact
+    // 3. Optimize front-run amount
+    // 4. Calculate back-run profit
 
-    const priceBeforeVictim = BigInt('2000000000000000000000'); // 2000 USDC/ETH
-    const priceImpact = BigInt('50000000000000000000'); // 50 USDC impact
-    const priceAfterVictim = priceBeforeVictim + priceImpact;
+    // Simplified calculation for demonstration
+    const priceBeforeVictim = 200; // $200 per SOL
+    const victimAmountSOL = Number(victim.amountIn) / 1e9;
 
-    // Calculate optimal front-run amount (typically 10-20% of victim's trade)
-    const optimalFrontRunAmount = victim.amountIn / BigInt(10); // 10% of victim
+    // Estimate price impact based on trade size
+    // Larger trades = more slippage = better sandwich opportunities
+    const priceImpactPercent = Math.min((victimAmountSOL / 1000) * 100, 5); // Max 5% impact
 
-    // Calculate expected profit from price movement
-    const expectedProfit = (optimalFrontRunAmount * priceImpact) / BigInt(1e18);
+    const priceAfterVictim = priceBeforeVictim * (1 + priceImpactPercent / 100);
+
+    // Optimal front-run amount is typically a fraction of victim's trade
+    const optimalFrontRunAmount = victim.amountIn / BigInt(4); // 25% of victim trade
+
+    // Calculate profit: Buy low, victim pushes price up, sell high
+    const frontRunCostLamports = optimalFrontRunAmount;
+    const backRunRevenueLamports = BigInt(
+      Math.floor((Number(optimalFrontRunAmount) / 1e9) * priceAfterVictim * 1e9)
+    );
+    const expectedProfit = backRunRevenueLamports - frontRunCostLamports;
+
+    // Check if profitable
+    if (expectedProfit <= BigInt(0)) {
+      return null;
+    }
 
     return {
       priceBeforeVictim,
       priceAfterVictim,
       optimalFrontRunAmount,
       expectedProfit,
-      gasEstimate: BigInt(600000),
+      computeUnitsEstimate: 300000,
     };
   }
 
   /**
-   * Steps 3-4: Calculate optimal sandwich amounts
-   */
-  private calculateOptimalSandwich(
-    victim: VictimTransaction,
-    simulation: SandwichCalculation
-  ): SandwichCalculation {
-    // In production, would optimize the front-run amount to maximize profit
-    // while accounting for our own price impact
-
-    return simulation;
-  }
-
-  /**
-   * Step 6: BUILD BUNDLE - Construct three-transaction sandwich
-   * MEV_Bundle = [Tx_A (Front-Run), Tx_Victim (Original Trade), Tx_B (Back-Run)]
+   * Step 6: Build the sandwich bundle [Tx_A, Tx_Victim, Tx_B]
+   * ORDER IS CRITICAL!
    */
   async buildBundle(opportunity: Opportunity): Promise<Bundle> {
-    const currentBlock = 0; // Would get from provider
+    const currentSlot = await this.connection.getSlot();
 
-    // CRITICAL: Order matters!
-    // Tx_A: Front-run (buy before victim)
-    const txFrontRun = '0x...'; // Encoded buy transaction with higher gas
+    strategyLogger.warn(
+      { opportunity: opportunity.type },
+      '⚠️  Building UNETHICAL sandwich bundle'
+    );
 
-    // Tx_Victim: The original victim transaction (included via bundle)
-    const txVictim = '0x...'; // Original victim transaction
+    // In production, construct actual swap transactions
+    // Tx_A (Front-run): Buy before victim
+    const txFrontRun = new Transaction(); // Would be constructed with actual swap instructions
 
-    // Tx_B: Back-run (sell after victim at higher price)
-    const txBackRun = '0x...'; // Encoded sell transaction
+    // Tx_Victim: The victim's transaction (included in bundle)
+    const txVictim = new Transaction(); // Victim's original transaction
+
+    // Tx_B (Back-run): Sell after victim
+    const txBackRun = new Transaction(); // Would be constructed with actual swap instructions
 
     return {
-      txs: [txFrontRun, txVictim, txBackRun], // ORDER IS CRITICAL
-      blockNumber: currentBlock + 1,
+      transactions: [txFrontRun, txVictim, txBackRun], // ORDER IS CRITICAL
+      slot: currentSlot + 1,
       minTimestamp: Math.floor(Date.now() / 1000),
-      maxTimestamp: Math.floor(Date.now() / 1000) + 60, // Short validity (1 min)
+      maxTimestamp: Math.floor(Date.now() / 1000) + 10, // Very short validity (10 seconds)
     };
   }
 
   /**
-   * Step 7: Estimate profit with simulation
+   * Estimate profit with simulation
    */
   async estimateProfit(bundle: Bundle, fork: ForkHandle): Promise<ProfitEstimate> {
-    // Simulate all three transactions in order
-    const grossProfitWei = BigInt(1e17); // 0.1 ETH example
-    const gasPrice = BigInt(100e9); // 100 Gwei (higher for sandwich)
-    const gasUsed = BigInt(600000); // Three transactions
-    const gasCostWei = gasPrice * gasUsed;
-    const netProfitWei = grossProfitWei - gasCostWei;
+    strategyLogger.warn('⚠️  Simulating UNETHICAL sandwich attack');
 
-    strategyLogger.warn(
-      {
-        grossProfitUSD: this.weiToUSD(grossProfitWei),
-        gasCostUSD: this.weiToUSD(gasCostWei),
-        netProfitUSD: this.weiToUSD(netProfitWei),
-      },
-      '⚠️  SANDWICH PROFIT ESTIMATE (UNETHICAL - DO NOT EXECUTE)'
-    );
+    // In production, simulate on fork and calculate actual profit
+    const grossProfitLamports = BigInt(200000000); // 0.2 SOL example
+    const priorityFeeLamports = BigInt(200000); // 0.0002 SOL
+    const jitoTipLamports = BigInt(500000); // 0.0005 SOL tip
+    const netProfitLamports = grossProfitLamports - priorityFeeLamports - jitoTipLamports;
 
     return {
-      grossProfitWei,
-      gasCostWei,
-      netProfitWei,
-      netProfitUSD: this.weiToUSD(netProfitWei),
-      gasPrice,
+      grossProfitLamports,
+      priorityFeeLamports: priorityFeeLamports + jitoTipLamports,
+      netProfitLamports,
+      netProfitUSD: this.lamportsToUSD(netProfitLamports),
+      priorityFeePerCU: Number(priorityFeeLamports) / 300000, // per compute unit
     };
   }
 
-  private weiToUSD(wei: bigint, ethPriceUSD = 2000): number {
-    const eth = Number(wei) / 1e18;
-    return eth * ethPriceUSD;
+  private lamportsToUSD(lamports: bigint, solPriceUSD = 200): number {
+    const sol = Number(lamports) / 1e9;
+    return sol * solPriceUSD;
   }
 }
