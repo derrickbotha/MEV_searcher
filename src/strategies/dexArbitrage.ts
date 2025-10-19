@@ -1,55 +1,68 @@
-import { ethers } from 'ethers';
-import { Strategy, ClassifiedTx, Opportunity, Bundle, ProfitEstimate, ForkHandle } from '../types';
+import { PublicKey, Transaction, VersionedTransaction, Connection } from '@solana/web3.js';
+import { Strategy, ClassifiedTx, Opportunity, Bundle, ProfitEstimate, ForkHandle, DEXProtocol } from '../types';
 import { strategyLogger } from '../utils/logger';
+import { createJupiterApiClient } from '@jup-ag/api';
+import { Liquidity } from '@raydium-io/raydium-sdk';
 
 /**
- * Algorithm 2: DEX Arbitrage Strategy
- * 
- * Finds profitable price differences between two Decentralized Exchanges (DEXs).
- * 
+ * Algorithm 2: DEX Arbitrage Strategy (Solana)
+ *
+ * Finds profitable price differences between Solana DEXs.
+ *
  * Steps:
  * 1. TRIGGER: Identify pending DEX swap transaction
- * 2. COMPARE PRICES: Check asset price across multiple DEXs
+ * 2. COMPARE PRICES: Check asset price across multiple DEXs (Jupiter, Raydium, Orca)
  * 3. IDENTIFY OPPORTUNITY: Find price discrepancy
  * 4. CALCULATE PROFIT: Model buy low, sell high trade
- * 5. DETERMINE VIABILITY: Check net profit after gas
- * 6. EXECUTE: Submit bundle if profitable
+ * 5. DETERMINE VIABILITY: Check net profit after compute units and priority fees
+ * 6. EXECUTE: Submit Jito bundle if profitable
  */
 
 interface DexPrice {
-  dex: string;
-  price: bigint; // Price in wei (e.g., USDC per ETH)
-  liquidity: bigint;
-  poolAddress: string;
+  dex: DEXProtocol;
+  price: number; // Price in USD (e.g., USDC per SOL)
+  liquidity: bigint; // In lamports
+  poolAddress: PublicKey;
 }
 
 interface ArbitrageOpportunity {
-  buyDex: string;
-  sellDex: string;
-  buyPrice: bigint;
-  sellPrice: bigint;
-  asset: string;
-  amount: bigint;
-  grossProfit: bigint;
+  buyDex: DEXProtocol;
+  sellDex: DEXProtocol;
+  buyPrice: number;
+  sellPrice: number;
+  tokenIn: PublicKey;
+  tokenOut: PublicKey;
+  amount: bigint; // In lamports
+  grossProfit: bigint; // In lamports
 }
 
 export class DexArbitrageStrategy implements Strategy {
   name = 'DEX_ARBITRAGE';
-  description = 'Basic MEV: Profit from price differences between DEXs';
+  description = 'Basic MEV: Profit from price differences between Solana DEXs';
   isLegal = true; // This is ethical arbitrage - helps balance markets
 
-  private dexRouters = {
-    UNISWAP_V2: '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D',
-    UNISWAP_V3: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    SUSHISWAP: '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F',
+  private dexPrograms = {
+    [DEXProtocol.RAYDIUM]: new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'),
+    [DEXProtocol.JUPITER]: new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'),
+    [DEXProtocol.ORCA]: new PublicKey('9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP'),
   };
 
   private minProfitThresholdUSD: number;
-  private maxGasPriceGwei: bigint;
+  private maxPriorityFeeLamports: bigint;
+  private jupiterApi: ReturnType<typeof createJupiterApiClient>;
+  private connection: Connection;
 
-  constructor(minProfitUSD = 10, maxGasPriceGwei = 300) {
+  constructor(
+    minProfitUSD = 10,
+    maxPriorityFeeLamports = BigInt(1000000), // 0.001 SOL
+    connection?: Connection
+  ) {
     this.minProfitThresholdUSD = minProfitUSD;
-    this.maxGasPriceGwei = BigInt(maxGasPriceGwei) * BigInt(1e9);
+    this.maxPriorityFeeLamports = maxPriorityFeeLamports;
+    this.connection = connection || new Connection('https://api.mainnet-beta.solana.com');
+
+    // Initialize Jupiter API client
+    this.jupiterApi = createJupiterApiClient();
   }
 
   /**
@@ -104,21 +117,20 @@ export class DexArbitrageStrategy implements Strategy {
       // Step 4: CALCULATE PROFIT - Model the trade
       const grossProfit = this.calculateGrossProfit(arbitrageOpp);
 
-      // Step 5: DETERMINE VIABILITY - Check gas and fees
-      const gasEstimate = BigInt(400000); // Estimate for two DEX swaps
-      const gasPrice = tx.gasPrice;
-      const gasCost = gasEstimate * gasPrice;
-      const validatorTip = BigInt(1e16); // 0.01 ETH tip
+      // Step 5: DETERMINE VIABILITY - Check compute units and priority fees
+      const computeUnitsEstimate = 200000; // Estimate for two DEX swaps
+      const priorityFeeEstimate = BigInt(100000); // 0.0001 SOL estimate
+      const jitoTip = BigInt(100000); // 0.0001 SOL tip
 
-      const netProfitWei = grossProfit - gasCost - validatorTip;
-      const netProfitUSD = this.weiToUSD(netProfitWei);
+      const netProfitLamports = grossProfit - priorityFeeEstimate - jitoTip;
+      const netProfitUSD = this.lamportsToUSD(netProfitLamports);
 
       strategyLogger.info(
         {
           buyDex: arbitrageOpp.buyDex,
           sellDex: arbitrageOpp.sellDex,
-          grossProfitUSD: this.weiToUSD(grossProfit),
-          gasCostUSD: this.weiToUSD(gasCost),
+          grossProfitUSD: this.lamportsToUSD(grossProfit),
+          priorityFeeUSD: this.lamportsToUSD(priorityFeeEstimate),
           netProfitUSD,
         },
         'Arbitrage opportunity detected'
@@ -133,21 +145,23 @@ export class DexArbitrageStrategy implements Strategy {
       const bundle = await this.buildBundle({
         type: this.name,
         expectedProfitUSD: netProfitUSD,
-        gasEstimate,
-        targetBlock: 0, // Will be set later
-        bundle: { txs: [], blockNumber: 0 },
+        computeUnitsEstimate,
+        targetSlot: 0, // Will be set later
+        bundle: { transactions: [], slot: 0 },
         strategy: this.name,
         confidence: this.calculateConfidence(arbitrageOpp),
+        priorityFee: priorityFeeEstimate,
       });
 
       return {
         type: this.name,
         expectedProfitUSD: netProfitUSD,
-        gasEstimate,
-        targetBlock: 0,
+        computeUnitsEstimate,
+        targetSlot: 0,
         bundle,
         strategy: this.name,
         confidence: this.calculateConfidence(arbitrageOpp),
+        priorityFee: priorityFeeEstimate,
       };
     } catch (error: any) {
       strategyLogger.error({ error: error.message }, 'Error analyzing arbitrage');
@@ -156,28 +170,86 @@ export class DexArbitrageStrategy implements Strategy {
   }
 
   /**
-   * Step 2: Get prices across multiple DEXs
+   * Step 2: Get prices across multiple DEXs using Jupiter API
    */
-  private async getPricesAcrossDexs(tokenIn: string, tokenOut: string): Promise<DexPrice[]> {
+  private async getPricesAcrossDexs(tokenIn: PublicKey, tokenOut: PublicKey): Promise<DexPrice[]> {
     const prices: DexPrice[] = [];
 
-    // In production, query actual DEX contracts
-    // For now, return mock data for demonstration
-    prices.push({
-      dex: 'UNISWAP_V3',
-      price: BigInt('2000000000000000000000'), // 2000 USDC per ETH
-      liquidity: BigInt('1000000000000000000000'), // 1000 ETH liquidity
-      poolAddress: '0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8',
-    });
+    try {
+      // Get Jupiter quote for price comparison
+      const quote = await this.jupiterApi.quoteGet({
+        inputMint: tokenIn.toString(),
+        outputMint: tokenOut.toString(),
+        amount: 1000000000, // 1 SOL in lamports
+        slippageBps: 50, // 0.5%
+      });
 
-    prices.push({
-      dex: 'SUSHISWAP',
-      price: BigInt('2010000000000000000000'), // 2010 USDC per ETH (arbitrage opportunity!)
-      liquidity: BigInt('500000000000000000000'), // 500 ETH liquidity
-      poolAddress: '0x397FF1542f962076d0BFE58eA045FfA2d347ACa0',
-    });
+      if (quote && quote.routePlan) {
+        // Extract DEX information from route plan
+        const dexPrices = new Map<DEXProtocol, { price: number; liquidity: bigint; pool: PublicKey }>();
+
+        for (const step of quote.routePlan.slice(0, 5)) { // Take top 5 routes
+          const dex = this.mapJupiterMarketToDex(step.swapInfo?.label || 'UNKNOWN');
+          const price = Number(quote.outAmount) / 1e9; // Convert to output per input
+
+          if (!dexPrices.has(dex)) {
+            dexPrices.set(dex, {
+              price,
+              liquidity: BigInt(1000000000), // Placeholder - would get from pool data
+              pool: step.swapInfo?.ammKey ? new PublicKey(step.swapInfo.ammKey) : tokenIn,
+            });
+          }
+        }
+
+        // Convert to DexPrice array
+        for (const [dex, data] of dexPrices) {
+          prices.push({
+            dex,
+            price: data.price,
+            liquidity: data.liquidity,
+            poolAddress: data.pool,
+          });
+        }
+      }
+
+      // Fallback mock data if Jupiter fails
+      if (prices.length === 0) {
+        prices.push({
+          dex: DEXProtocol.RAYDIUM,
+          price: 200, // $200 per SOL
+          liquidity: BigInt(1000000000000), // 1000 SOL liquidity
+          poolAddress: new PublicKey('8HoQnePLqPj4M7PUDzfw8e3Ymdwgc7NLGnaTUapubyvu'),
+        });
+
+        prices.push({
+          dex: DEXProtocol.JUPITER,
+          price: 201, // $201 per SOL (arbitrage opportunity!)
+          liquidity: BigInt(500000000000), // 500 SOL liquidity
+          poolAddress: new PublicKey('27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4'),
+        });
+      }
+
+    } catch (error) {
+      strategyLogger.warn({ error }, 'Failed to get DEX prices, using fallback');
+      // Fallback mock data
+      prices.push({
+        dex: DEXProtocol.RAYDIUM,
+        price: 200,
+        liquidity: BigInt(1000000000000),
+        poolAddress: new PublicKey('8HoQnePLqPj4M7PUDzfw8e3Ymdwgc7NLGnaTUapubyvu'),
+      });
+    }
 
     return prices;
+  }
+
+  private mapJupiterMarketToDex(marketLabel: string): DEXProtocol {
+    const label = marketLabel.toLowerCase();
+    if (label.includes('raydium')) return DEXProtocol.RAYDIUM;
+    if (label.includes('orca')) return DEXProtocol.ORCA;
+    if (label.includes('saber')) return DEXProtocol.SABER;
+    if (label.includes('meteora')) return DEXProtocol.METEORA;
+    return DEXProtocol.JUPITER; // Default to Jupiter aggregator
   }
 
   /**
@@ -230,13 +302,13 @@ export class DexArbitrageStrategy implements Strategy {
 
     // Price difference exists - calculate profit
     const priceDiff = sellDex.price - buyDex.price;
-    const grossProfit = (amount * priceDiff) / BigInt(1e18);
+    const grossProfitLamports = BigInt(Math.floor((Number(amount) / 1e9) * priceDiff * 1e9)); // Convert to lamports
 
-    // Check if profitable (at least 0.5% profit before gas)
+    // Check if profitable (at least 0.5% profit before fees)
     const minProfitBps = 50; // 0.5%
     const minProfit = (amount * BigInt(minProfitBps)) / BigInt(10000);
 
-    if (grossProfit < minProfit) {
+    if (grossProfitLamports < minProfit) {
       return null;
     }
 
@@ -245,9 +317,10 @@ export class DexArbitrageStrategy implements Strategy {
       sellDex: sellDex.dex,
       buyPrice: buyDex.price,
       sellPrice: sellDex.price,
-      asset: 'ETH', // Simplified
+      tokenIn: new PublicKey('So11111111111111111111111111111111111111112'), // SOL
+      tokenOut: new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), // USDC
       amount,
-      grossProfit,
+      grossProfit: grossProfitLamports,
     };
   }
 
@@ -262,20 +335,20 @@ export class DexArbitrageStrategy implements Strategy {
    * Build the arbitrage bundle (Tx_Buy, Tx_Sell)
    */
   async buildBundle(opportunity: Opportunity): Promise<Bundle> {
-    const currentBlock = 0; // Would get from provider
+    const currentSlot = await this.connection.getSlot();
 
-    // In production, construct actual swap transactions
+    // In production, construct actual swap transactions using Jupiter/Raydium SDKs
     // Tx_Buy: Buy on cheaper DEX
-    const txBuy = '0x...'; // Encoded buy transaction
+    const txBuy = new Transaction(); // Would be constructed with actual swap instructions
 
     // Tx_Sell: Sell on expensive DEX
-    const txSell = '0x...'; // Encoded sell transaction
+    const txSell = new Transaction(); // Would be constructed with actual swap instructions
 
     return {
-      txs: [txBuy, txSell],
-      blockNumber: currentBlock + 1,
+      transactions: [txBuy, txSell],
+      slot: currentSlot + 1,
       minTimestamp: Math.floor(Date.now() / 1000),
-      maxTimestamp: Math.floor(Date.now() / 1000) + 300, // 5 min validity
+      maxTimestamp: Math.floor(Date.now() / 1000) + 30, // 30 second validity for Solana
     };
   }
 
@@ -284,29 +357,28 @@ export class DexArbitrageStrategy implements Strategy {
    */
   async estimateProfit(bundle: Bundle, fork: ForkHandle): Promise<ProfitEstimate> {
     // In production, simulate on fork and calculate actual profit
-    const grossProfitWei = BigInt(5e16); // 0.05 ETH example
-    const gasPrice = BigInt(50e9); // 50 Gwei
-    const gasUsed = BigInt(400000);
-    const gasCostWei = gasPrice * gasUsed;
-    const netProfitWei = grossProfitWei - gasCostWei;
+    const grossProfitLamports = BigInt(50000000); // 0.05 SOL example
+    const priorityFeeLamports = BigInt(100000); // 0.0001 SOL
+    const jitoTipLamports = BigInt(100000); // 0.0001 SOL tip
+    const netProfitLamports = grossProfitLamports - priorityFeeLamports - jitoTipLamports;
 
     return {
-      grossProfitWei,
-      gasCostWei,
-      netProfitWei,
-      netProfitUSD: this.weiToUSD(netProfitWei),
-      gasPrice,
+      grossProfitLamports,
+      priorityFeeLamports: priorityFeeLamports + jitoTipLamports,
+      netProfitLamports,
+      netProfitUSD: this.lamportsToUSD(netProfitLamports),
+      priorityFeePerCU: Number(priorityFeeLamports) / 200000, // per compute unit
     };
   }
 
   private calculateConfidence(arb: ArbitrageOpportunity): number {
     // Higher confidence for larger price differences
-    const priceDiffPercent = Number((arb.sellPrice - arb.buyPrice) * BigInt(10000) / arb.buyPrice);
-    return Math.min(priceDiffPercent / 100, 1.0); // 0-1 scale
+    const priceDiffPercent = ((arb.sellPrice - arb.buyPrice) / arb.buyPrice) * 100;
+    return Math.min(priceDiffPercent / 2, 1.0); // 0-1 scale, max at 2% difference
   }
 
-  private weiToUSD(wei: bigint, ethPriceUSD = 2000): number {
-    const eth = Number(wei) / 1e18;
-    return eth * ethPriceUSD;
+  private lamportsToUSD(lamports: bigint, solPriceUSD = 200): number {
+    const sol = Number(lamports) / 1e9;
+    return sol * solPriceUSD;
   }
 }

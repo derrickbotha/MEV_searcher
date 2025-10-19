@@ -1,186 +1,229 @@
 /**
- * High-Performance MEV Engine Wrapper
- * 
- * Provides TypeScript interface to ultra-fast C++ core engine
- * targeting sub-10ms execution times.
+ * C++-Only High-Performance MEV Engine Wrapper
+ *
+ * NO TypeScript fallbacks - pure C++ execution with built-in redundancies
+ * Sandwich attacks run entirely in C++ with triple redundancy
  */
 
 import { EventEmitter } from 'events';
 
-export interface MEVEngineConfig {
+export interface CppOnlyMEVEngineConfig {
+  // Core settings
   minProfitWei: string;
   maxGasPrice: number;
   maxSlippageBps: number;
+
+  // Sandwich attack settings (C++ only)
+  enableSandwich: boolean;
+  sandwichMinVictimSize: string;
+  sandwichRedundancyLevel: number;
+
+  // Performance settings
+  enableParallelSim: boolean;
   numThreads: number;
+
+  // Safety settings
+  simulationOnly: boolean;
+
+  // Hardware optimization
+  enableSIMD: boolean;
+  enableRDTSC: boolean;
 }
 
-export interface Opportunity {
-  frontrunAmount: string;
-  backrunAmount: string;
-  expectedProfit: string;
-  validatorTip: number;
-  confidence: number;
+export interface SandwichOpportunity {
+  victimTx: any; // Raw transaction data
+  optimalFrontAmount: string;
+  optimalBackAmount: string;
+  expectedGrossProfit: string;
+  expectedNetProfit: string;
+  computeUnitsEstimate: number;
+  priorityFeeEstimate: number;
+  confidenceScore: number;
+  processingTime: number; // microseconds
+  isRedundantCalculation: boolean;
 }
 
-export interface EngineMetrics {
+export interface CppOnlyEngineMetrics {
+  // Transaction processing
   txsProcessed: number;
   opportunitiesFound: number;
   bundlesSubmitted: number;
-  totalProfitWei: number;
+  totalProfitWei: string;
+
+  // Performance metrics (microseconds)
   avgParseTimeUs: number;
-  avgFilterTimeUs: number;
-  avgSimulateTimeUs: number;
-  avgOptimizeTimeUs: number;
+  avgDetectionTimeUs: number;
   avgBuildTimeUs: number;
-  avgTotalTimeUs: number;
+  avgSubmitTimeUs: number;
+  totalExecutionUs: number;
+
+  // Redundancy metrics
+  redundantCalculations: number;
+  calculationFailures: number;
+  recoveryEvents: number;
 }
 
 /**
- * High-Performance MEV Engine (C++ backend)
- * 
- * Architecture:
- * - Phase A: Ingestion (<2ms) - RLP parsing + DAG filtering
- * - Phase B: Decision (2-5ms) - Shadow fork simulation + optimal sizing
- * - Phase C: Execution (<3ms) - Bundle building + submission
- * 
- * Total: 7-10ms from mempool to submission
+ * C++-Only High-Performance MEV Engine
+ *
+ * NO TypeScript fallbacks - all execution in C++ with redundancies:
+ * - Triple-redundant profit calculations (DP + RL + Heuristic)
+ * - Parallel execution with error recovery
+ * - Hardware-optimized sub-10ms processing
+ * - Built-in failover and redundancy systems
  */
-export class HighPerformanceMEVEngine extends EventEmitter {
-  private native: any;
+export class CppOnlyHighPerformanceMEVEngine extends EventEmitter {
+  private nativeEngine: any;
   private initialized = false;
+  private config: CppOnlyMEVEngineConfig;
 
-  constructor(private config: MEVEngineConfig) {
+  constructor(config: CppOnlyMEVEngineConfig) {
     super();
-    
+
+    this.config = config;
+
+    console.log('[CppOnlyMEVEngine] ⚡ INITIALIZING C++-ONLY ENGINE WITH REDUNDANCIES');
+    console.log('[CppOnlyMEVEngine] ⚠️  NO TypeScript fallbacks available');
+    console.log('[CppOnlyMEVEngine] Sandwich attacks:', config.enableSandwich ? 'ENABLED ⚠️' : 'DISABLED');
+    console.log('[CppOnlyMEVEngine] Redundancy level:', config.sandwichRedundancyLevel);
+    console.log('[CppOnlyMEVEngine] Simulation only:', config.simulationOnly);
+
+    if (config.enableSandwich && !config.simulationOnly) {
+      console.warn('[CppOnlyMEVEngine] ⚠️  WARNING: Sandwich attacks enabled in PRODUCTION mode!');
+      console.warn('[CppOnlyMEVEngine] ⚠️  This is UNETHICAL and potentially ILLEGAL');
+    }
+
+    // Load C++ native addon
     try {
-      // Load native C++ addon
-      this.native = require('../../build/mev_addon.node');
+      const mevAddon = require('../../../build/Release/mev_engine.node');
+      this.nativeEngine = new mevAddon.MEVEngine(config);
+      console.log('[CppOnlyMEVEngine] ✓ C++ native addon loaded');
     } catch (error) {
-      console.error('Failed to load C++ MEV engine. Run: npm run build:cpp');
-      throw error;
+      throw new Error(`Failed to load C++ MEV engine: ${error}`);
     }
   }
 
   /**
-   * Initialize engine (pre-computes lookup tables, warms caches)
-   * Takes ~5 seconds due to optimal sizing pre-computation
+   * Initialize C++-only engine with redundancies
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
       throw new Error('Engine already initialized');
     }
 
-    console.log('Initializing high-performance MEV engine...');
-    console.log('Pre-computing optimal sizing tables (~5 seconds)...');
-    
-    const start = Date.now();
-    this.native.initialize(this.config);
-    const elapsed = Date.now() - start;
-    
-    console.log(`Engine initialized in ${elapsed}ms`);
-    
-    // Set up callbacks
-    this.native.setOpportunityCallback((opp: Opportunity) => {
-      this.emit('opportunity', opp);
-    });
-    
-    this.native.setSubmissionCallback((encodedBundle: Buffer) => {
-      return this.submitBundle(encodedBundle);
-    });
-    
-    this.initialized = true;
-  }
+    try {
+      console.log('[CppOnlyMEVEngine] Initializing C++ engine with redundancies...');
+      const success = this.nativeEngine.initialize();
 
-  /**
-   * Process raw transaction (MAIN ENTRY POINT)
-   * 
-   * Target: 7-10ms end-to-end
-   * 
-   * @param rawTx - RLP-encoded transaction bytes
-   * @returns true if opportunity found and submitted
-   */
-  processTransaction(rawTx: Buffer): boolean {
-    if (!this.initialized) {
-      throw new Error('Engine not initialized. Call initialize() first.');
+      if (!success) {
+        throw new Error('C++ engine initialization failed');
+      }
+
+      this.initialized = true;
+      console.log('[CppOnlyMEVEngine] ✓ C++-only engine ready with built-in redundancies');
+
+      this.emit('initialized');
+
+    } catch (error) {
+      console.error('[CppOnlyMEVEngine] Initialization failed:', error);
+      throw error;
     }
-
-    return this.native.processTransaction(rawTx);
   }
 
   /**
-   * Get real-time performance metrics
+   * Process transaction with C++-only execution
+   * NO TypeScript fallbacks - pure C++ with redundancies
    */
-  getMetrics(): EngineMetrics {
+  async processTransactionBytes(txBytes: Buffer): Promise<boolean> {
     if (!this.initialized) {
       throw new Error('Engine not initialized');
     }
 
-    return this.native.getMetrics();
-  }
-
-  /**
-   * Graceful shutdown
-   */
-  async shutdown(): Promise<void> {
-    if (!this.initialized) return;
-    
-    console.log('Shutting down MEV engine...');
-    this.native.shutdown();
-    this.initialized = false;
-  }
-
-  /**
-   * Submit bundle via Flashbots/Eden (implemented in TypeScript)
-   * 
-   * @param encodedBundle - RLP-encoded bundle from C++ engine
-   * @returns true if submitted successfully
-   */
-  private async submitBundle(encodedBundle: Buffer): Promise<boolean> {
     try {
-      // TODO: Implement actual submission logic
-      // For now: emit event for external handler
-      this.emit('bundle', encodedBundle);
-      return true;
+      // Direct call to C++ engine - no fallbacks
+      const success = this.nativeEngine.processTransaction(txBytes);
+
+      if (success) {
+        this.emit('opportunityProcessed');
+      }
+
+      return success;
+
     } catch (error) {
-      console.error('Bundle submission failed:', error);
-      return false;
+      console.error('[CppOnlyMEVEngine] Transaction processing failed:', error);
+      this.emit('processingError', error);
+      throw error;
     }
   }
 
   /**
-   * Print performance report
+   * Get comprehensive C++ engine metrics
    */
-  printPerformanceReport(): void {
-    const metrics = this.getMetrics();
-    
-    console.log('\n╔════════════════════════════════════════════════════╗');
-    console.log('║  High-Performance MEV Engine Metrics               ║');
-    console.log('╚════════════════════════════════════════════════════╝');
-    console.log(`\n  Transactions Processed: ${metrics.txsProcessed.toLocaleString()}`);
-    console.log(`  Opportunities Found:    ${metrics.opportunitiesFound.toLocaleString()}`);
-    console.log(`  Bundles Submitted:      ${metrics.bundlesSubmitted.toLocaleString()}`);
-    console.log(`  Total Profit:           ${(metrics.totalProfitWei / 1e18).toFixed(4)} ETH`);
-    
-    console.log('\n  Latency Breakdown (microseconds):');
-    console.log(`    Parse:      ${metrics.avgParseTimeUs.toFixed(2)} μs ${this.getStatus(metrics.avgParseTimeUs, 100)}`);
-    console.log(`    Filter:     ${metrics.avgFilterTimeUs.toFixed(2)} μs ${this.getStatus(metrics.avgFilterTimeUs, 50)}`);
-    console.log(`    Simulate:   ${metrics.avgSimulateTimeUs.toFixed(2)} μs ${this.getStatus(metrics.avgSimulateTimeUs, 4000)}`);
-    console.log(`    Optimize:   ${metrics.avgOptimizeTimeUs.toFixed(2)} μs ${this.getStatus(metrics.avgOptimizeTimeUs, 500)}`);
-    console.log(`    Build:      ${metrics.avgBuildTimeUs.toFixed(2)} μs ${this.getStatus(metrics.avgBuildTimeUs, 1000)}`);
-    console.log(`    ─────────────────────────────────────`);
-    console.log(`    TOTAL:      ${metrics.avgTotalTimeUs.toFixed(2)} μs (${(metrics.avgTotalTimeUs / 1000).toFixed(2)} ms)`);
-    console.log(`    TARGET:     < 10000 μs (10 ms) ${this.getStatus(metrics.avgTotalTimeUs, 10000)}`);
-    
-    console.log('\n  Success Rate:');
-    const successRate = metrics.txsProcessed > 0 
-      ? (metrics.opportunitiesFound / metrics.txsProcessed * 100).toFixed(2)
-      : '0.00';
-    console.log(`    ${successRate}% of transactions identified as opportunities`);
-    
-    console.log('');
+  getMetrics(): CppOnlyEngineMetrics {
+    if (!this.initialized) {
+      throw new Error('Engine not initialized');
+    }
+
+    return this.nativeEngine.getMetrics();
   }
 
-  private getStatus(actual: number, target: number): string {
-    return actual <= target ? '✓' : '✗';
+  /**
+   * Print detailed performance metrics
+   */
+  printMetrics(): void {
+    const metrics = this.getMetrics();
+
+    console.log('\n╔══════════════════════════════════════════════════════════════╗');
+    console.log('║  C++-Only MEV Engine Performance Metrics (with Redundancy)  ║');
+    console.log('╚══════════════════════════════════════════════════════════════╝');
+    console.log(`  Transactions Processed: ${metrics.txsProcessed}`);
+    console.log(`  Opportunities Found:    ${metrics.opportunitiesFound}`);
+    console.log(`  Bundles Submitted:      ${metrics.bundlesSubmitted}`);
+    console.log(`  Total Profit (Wei):     ${metrics.totalProfitWei}`);
+    console.log('\n--- Performance (μs) ---');
+    console.log(`  Parse:     ${metrics.avgParseTimeUs} μs (target: < 100 μs)`);
+    console.log(`  Detect:    ${metrics.avgDetectionTimeUs} μs (target: < 5000 μs)`);
+    console.log(`  Build:     ${metrics.avgBuildTimeUs} μs (target: < 2000 μs)`);
+    console.log(`  Submit:    ${metrics.avgSubmitTimeUs} μs (target: < 3000 μs)`);
+    console.log(`  TOTAL:     ${metrics.totalExecutionUs} μs (target: < 10000 μs)`);
+    console.log('\n--- Redundancy ---');
+    console.log(`  Redundant Calculations: ${metrics.redundantCalculations}`);
+    console.log(`  Calculation Failures:   ${metrics.calculationFailures}`);
+    console.log(`  Recovery Events:        ${metrics.recoveryEvents}`);
+
+    const totalTarget = 10000;
+    const performanceOk = metrics.totalExecutionUs < totalTarget;
+    console.log(`\nStatus: ${performanceOk ? '✓ PASS' : '✗ FAIL'} (target: < ${totalTarget}μs)`);
+    console.log('══════════════════════════════════════════════════════════════\n');
+  }
+
+  /**
+   * Emergency shutdown with cleanup
+   */
+  async shutdown(): Promise<void> {
+    console.log('[CppOnlyMEVEngine] Initiating C++-only engine shutdown...');
+
+    if (this.nativeEngine) {
+      this.nativeEngine.shutdown();
+    }
+
+    this.initialized = false;
+    this.emit('shutdown');
+
+    console.log('[CppOnlyMEVEngine] ✓ Shutdown complete');
+  }
+
+  /**
+   * Check if engine is ready (C++ initialized)
+   */
+  isReady(): boolean {
+    return this.initialized;
+  }
+
+  /**
+   * Get current configuration
+   */
+  getConfig(): CppOnlyMEVEngineConfig {
+    return this.config;
   }
 }

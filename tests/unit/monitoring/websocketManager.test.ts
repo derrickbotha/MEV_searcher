@@ -1,5 +1,5 @@
-import { WebSocketManager } from '../../src/monitoring/websocketManager';
-import { RPCConfig } from '../../src/types';
+import { WebSocketManager } from '../../../dist/monitoring/websocketManager';
+import { RPCConfig } from '../../../dist/types';
 
 describe('WebSocketManager', () => {
   let wsManager: WebSocketManager;

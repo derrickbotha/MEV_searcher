@@ -1,5 +1,5 @@
-import { TxClassifier } from '../../src/monitoring/txClassifier';
-import { PendingTx, TxType } from '../../src/types';
+import { TxClassifier } from '../../../dist/monitoring/txClassifier';
+import { PendingTx, TxType } from '../../../dist/types';
 
 describe('TxClassifier', () => {
   let classifier: TxClassifier;
