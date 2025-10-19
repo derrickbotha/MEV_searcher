@@ -1,243 +1,288 @@
 # ==========================================
-# Production-Ready MEV Searcher Bot
-# Multi-Stage Build: C++ Core + TypeScript Orchestration
-# Target: Sub-10ms Execution with Enterprise Security
+# MEV Searcher Dashboard - Complete Application
+# Multi-Stage Build: Python + Node.js + C++ Components
+# Production-Ready: Django + PostgreSQL + Redis + Vector DB
 # ==========================================
 
 # ==========================================
-# Stage 1: C++ Builder (Ultra-Optimized Core Engine)
+# Stage 1: Python Dependencies Builder
 # ==========================================
-FROM node:18-alpine AS cpp-builder
+FROM python:3.9-slim AS python-builder
 
-# Metadata
 LABEL maintainer="MEV Research Team <mev-research@example.com>" \
-      description="Ultra-fast C++ MEV Engine Core" \
+      description="Python Dependencies Builder" \
       version="1.0.0"
 
-# Install C++ build dependencies with security updates
-RUN apk update && apk upgrade && \
-    apk add --no-cache \
-        cmake \
-        make \
-        g++ \
-        python3 \
-        git \
-        linux-headers \
-        build-base \
-        binutils && \
-    rm -rf /var/cache/apk/*
+# Install system dependencies for Python packages
+RUN apt-get update && apt-get install -y \
+        build-essential \
+        libpq-dev \
+        libssl-dev \
+        libffi-dev \
+        libxml2-dev \
+        libxslt-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements and install Python dependencies
+WORKDIR /build
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ==========================================
+# Stage 2: Node.js Builder (Frontend Assets)
+# ==========================================
+FROM node:18-alpine AS node-builder
+
+LABEL maintainer="MEV Research Team <mev-research@example.com>" \
+      description="Node.js Frontend Builder" \
+      version="1.0.0"
+
+# Install build dependencies
+RUN apk add --no-cache git python3 make g++
 
 # Set working directory
 WORKDIR /build
 
-# Copy build configuration first for better caching
-COPY package*.json ./
-COPY tsconfig.json ./
-COPY cpp/CMakeLists.txt ./cpp/
-
-# Install Node.js dependencies (for cmake-js)
-RUN npm ci --only=production && npm cache clean --force
-
-# Copy C++ source code
-COPY cpp/include/ ./cpp/include/
-COPY cpp/src/ ./cpp/src/
-
-# Build C++ engine with maximum optimizations
-WORKDIR /build/cpp
-
-# Configure and build with aggressive optimizations
-RUN cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v3 -mtune=generic -flto=auto -ffast-math -funroll-loops -DNDEBUG -fomit-frame-pointer" \
-          -DCMAKE_EXE_LINKER_FLAGS="-flto=auto -Wl,--strip-all" \
-          -B build && \
-    cmake --build build --config Release --parallel $(nproc) && \
-    strip build/mev_benchmark && \
-    strip build/libmev_core.a
-
-# ==========================================
-# Stage 2: TypeScript Builder & Tester
-# ==========================================
-FROM node:18-alpine AS ts-builder
-
-# Metadata
-LABEL maintainer="MEV Research Team <mev-research@example.com>" \
-      description="TypeScript Builder & Test Runner" \
-      version="1.0.0"
-
-# Install build dependencies
-RUN apk update && apk upgrade && \
-    apk add --no-cache \
-        git \
-        python3 \
-        make \
-        g++ && \
-    rm -rf /var/cache/apk/*
-
-# Set working directory
-WORKDIR /app
-
-# Copy package files for dependency installation
+# Copy package files
 COPY package*.json ./
 COPY tsconfig.json ./
 COPY jest.config.js ./
 
-# Install ALL dependencies (including dev dependencies for building/testing)
-RUN npm ci && npm cache clean --force
-
-# Copy C++ compiled artifacts from previous stage
-COPY --from=cpp-builder /build/cpp/build ./cpp/build
-COPY --from=cpp-builder /build/node_modules ./node_modules
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
 
 # Copy source code
 COPY src/ ./src/
-COPY tests/ ./tests/
-COPY cpp/include/ ./cpp/include/
-COPY scripts/ ./scripts/
+COPY public/ ./public/
+COPY *.config.js ./
 
-# Build TypeScript with optimizations
+# Build frontend assets
 RUN npm run build
 
-# Run comprehensive test suite
-RUN npm run test:integration || (echo "Integration tests failed" && exit 1)
-
-# Run performance benchmarks (optional, can be skipped in CI)
-# RUN npm run benchmark:cpp || echo "Benchmarking skipped"
-
 # ==========================================
-# Stage 3: Security Scanner (Optional)
+# Stage 3: C++ Builder (Optional Performance Components)
 # ==========================================
-FROM aquasec/trivy:latest AS security-scanner
+FROM gcc:11-alpine AS cpp-builder
 
-# Metadata
 LABEL maintainer="MEV Research Team <mev-research@example.com>" \
-      description="Security Vulnerability Scanner" \
+      description="C++ Performance Components Builder" \
       version="1.0.0"
 
-# Copy application files for scanning
-COPY --from=ts-builder /app/package*.json /scan/
-COPY --from=ts-builder /app/dist /scan/dist
+# Install build dependencies
+RUN apk add --no-cache \
+        cmake \
+        make \
+        git \
+        linux-headers \
+        && rm -rf /var/cache/apk/*
 
-# Run security scan (this will be cached if no vulnerabilities found)
-RUN trivy filesystem --no-progress --exit-code 1 --severity HIGH,CRITICAL /scan || \
-    (echo "Security vulnerabilities found! Review and fix before deployment." && exit 1)
+# Set working directory
+WORKDIR /build
+
+# Copy C++ source code
+COPY cpp/ ./cpp/
+
+# Build C++ components (if CMakeLists.txt exists)
+RUN if [ -f "cpp/CMakeLists.txt" ]; then \
+        cd cpp && \
+        cmake -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_FLAGS="-O3 -march=x86-64 -mtune=generic" \
+              -B build && \
+        cmake --build build --config Release --parallel $(nproc) && \
+        strip build/* 2>/dev/null || true; \
+    fi
 
 # ==========================================
-# Stage 4: Production Runtime (Minimal & Secure)
+# Stage 4: PostgreSQL with pgvector
 # ==========================================
-FROM node:18-alpine AS production
+FROM postgres:15-alpine AS postgres-with-vector
 
-# Metadata
 LABEL maintainer="MEV Research Team <mev-research@example.com>" \
-      description="Production MEV Searcher Bot" \
-      version="1.0.0" \
-      security.scan="trivy"
+      description="PostgreSQL with pgvector" \
+      version="1.0.0"
 
-# Install minimal runtime dependencies
-RUN apk update && apk upgrade && \
-    apk add --no-cache \
-        libstdc++ \
-        libgcc \
+# Install pgvector
+RUN apk add --no-cache \
+        build-base \
+        git \
+        postgresql-dev \
+        && git clone --depth 1 https://github.com/pgvector/pgvector.git /tmp/pgvector \
+        && cd /tmp/pgvector \
+        && make OPTFLAGS="-O3" \
+        && make install \
+        && rm -rf /tmp/pgvector \
+        && apk del build-base git
+
+# ==========================================
+# Stage 5: Production Runtime
+# ==========================================
+FROM python:3.9-slim AS production
+
+LABEL maintainer="MEV Research Team <mev-research@example.com>" \
+      description="MEV Searcher Dashboard - Production Runtime" \
+      version="1.0.0"
+
+# Install runtime system dependencies
+RUN apt-get update && apt-get install -y \
+        # PostgreSQL client
+        postgresql-client \
+        # Redis client
+        redis-tools \
+        # System utilities
         curl \
         ca-certificates \
         dumb-init \
-        su-exec \
-        tzdata && \
-    rm -rf /var/cache/apk/* && \
-    addgroup -g 1001 -S mev && \
-    adduser -S -D -H -u 1001 -h /app -s /sbin/nologin -G mev -g mev mev
+        supervisor \
+        nginx \
+        # Python runtime dependencies
+        libpq5 \
+        libssl3 \
+        libffi7 \
+        libxml2 \
+        libxslt1.1 \
+        libjpeg62-turbo \
+        zlib1g \
+        # Additional tools
+        git \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean
+
+# Create application user and group
+RUN groupadd -r mev -g 1000 && \
+    useradd -r -g mev -u 1000 -m -d /app -s /bin/bash mev
+
+# Copy Python virtual environment
+COPY --from=python-builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy PostgreSQL with pgvector
+COPY --from=postgres-with-vector /usr/local/lib/postgresql/ /usr/local/lib/postgresql/
+COPY --from=postgres-with-vector /usr/local/share/postgresql/ /usr/local/share/postgresql/
+
+# Copy Node.js built assets
+COPY --from=node-builder /build/dist ./static/dist/
+
+# Copy C++ built binaries (if they exist)
+COPY --from=cpp-builder /build/cpp/build/* ./bin/
 
 # Set working directory
 WORKDIR /app
 
+# Copy Django application code
+COPY . /app/
+
+# Copy built frontend assets to Django static directory
+RUN mkdir -p /app/static/dist && \
+    cp -r ./static/dist/* /app/static/dist/ 2>/dev/null || true
+
 # Create necessary directories with proper permissions
-RUN mkdir -p /app/logs /app/data /app/tmp && \
-    chown -R mev:mev /app
+RUN mkdir -p /app/logs /app/media /app/staticfiles /app/tmp \
+             /var/lib/postgresql/data /var/log/supervisor \
+             /var/run/postgresql /var/log/postgresql \
+             /var/log/nginx /var/cache/nginx \
+    && chown -R mev:mev /app \
+    && chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql /var/log/postgresql \
+    && chmod -R 755 /app/bin/* 2>/dev/null || true
 
-# Copy package files
-COPY package*.json ./
+# Copy configuration files
+COPY docker/nginx.conf /etc/nginx/nginx.conf
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY scripts/init-db.sql /docker-entrypoint-initdb.d/
 
-# Install production dependencies only
-RUN npm ci --only=production --no-audit --no-fund && \
-    npm cache clean --force
+# Create initialization scripts
+RUN echo '#!/bin/bash\n\
+echo "=== MEV Dashboard Initialization ===\n\
+\n\
+# Wait for PostgreSQL to be ready\n\
+echo "Waiting for PostgreSQL..."\n\
+while ! pg_isready -h localhost -p 5432 -U postgres; do\n\
+    sleep 2\n\
+done\n\
+echo "PostgreSQL is ready!"\n\
+\n\
+# Run Django migrations\n\
+echo "Running Django migrations..."\n\
+cd /app\n\
+python manage.py migrate --verbosity=1\n\
+\n\
+# Collect static files\n\
+echo "Collecting static files..."\n\
+python manage.py collectstatic --noinput --clear\n\
+\n\
+# Create superuser if it does not exist\n\
+echo "Creating superuser..."\n\
+echo "from django.contrib.auth import get_user_model; User = get_user_model(); \n\
+if not User.objects.filter(username='\''admin'\'').exists(): \n\
+    User.objects.create_superuser('\''admin'\'', '\''admin@example.com'\'', '\''admin123'\'')\n\
+    print('\''Superuser created: admin/admin123'\'')\n\
+else:\n\
+    print('\''Superuser already exists'\'')"\n\
+' > /app/init_django.sh && chmod +x /app/init_django.sh
 
-# Copy compiled artifacts from build stages
-COPY --from=cpp-builder /build/cpp/build ./cpp/build
-COPY --from=ts-builder /app/dist ./dist
-COPY --from=ts-builder /app/node_modules ./node_modules
+# Create health check script
+RUN echo '#!/bin/bash\n\
+# Health check for MEV Dashboard\n\
+\n\
+# Check Django application\n\
+if curl -f --max-time 5 http://localhost:8000/health/ > /dev/null 2>&1; then\n\
+    echo "Django: OK"\n\
+else\n\
+    echo "Django: FAIL"\n\
+    exit 1\n\
+fi\n\
+\n\
+# Check PostgreSQL\n\
+if pg_isready -h localhost -p 5432 -U postgres > /dev/null 2>&1; then\n\
+    echo "PostgreSQL: OK"\n\
+else\n\
+    echo "PostgreSQL: FAIL"\n\
+    exit 1\n\
+fi\n\
+\n\
+# Check Redis\n\
+if redis-cli ping > /dev/null 2>&1; then\n\
+    echo "Redis: OK"\n\
+else\n\
+    echo "Redis: FAIL"\n\
+    exit 1\n\
+fi\n\
+\n\
+echo "All services healthy"\n\
+' > /app/healthcheck.sh && chmod +x /app/healthcheck.sh
 
-# Copy configuration and scripts
-COPY .env.example ./.env.example
-COPY scripts/init-db.sql ./scripts/
+# Make entrypoint script executable
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# Copy security scan results for audit trail (optional)
-# Note: Security scanning results are available in build logs
-
-# Set proper ownership
-RUN chown -R mev:mev /app
-
-# Switch to non-root user
-USER mev
-
-# Environment variables for production
-ENV NODE_ENV=production \
-    NODE_OPTIONS="--max-old-space-size=4096 --max-old-space-size=4096" \
-    UV_THREADPOOL_SIZE=16 \
-    LOG_LEVEL=info \
-    PORT=8080 \
-    METRICS_PORT=9090 \
-    HEALTH_CHECK_PORT=8080 \
-    TMPDIR=/app/tmp \
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DJANGO_SETTINGS_MODULE=mev_dashboard.settings \
+    DATABASE_URL=postgresql://postgres:postgres@localhost:5432/mev_dashboard \
+    REDIS_URL=redis://localhost:6379/0 \
+    PATH="/opt/venv/bin:/app/bin:$PATH" \
+    PYTHONPATH="/app" \
     HOME=/app
 
 # Expose ports
-EXPOSE 8080 9090
+EXPOSE 80 8000 5432 6379
 
-# Health check with proper timeout and retries
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f --max-time 5 http://localhost:${HEALTH_CHECK_PORT:-8080}/health || exit 1
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD /app/healthcheck.sh
 
-# Volume for persistent data
-VOLUME ["/app/logs", "/app/data"]
+# Volumes for persistent data
+VOLUME ["/app/logs", "/app/media", "/var/lib/postgresql/data", "/app/data"]
 
-# Default command with proper signal handling
-ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "--trace-warnings", "--trace-uncaught", "dist/index.js"]
-
-# ==========================================
-# Stage 5: Debug Image (Optional)
-# ==========================================
-FROM production AS debug
-
-# Metadata
-LABEL maintainer="MEV Research Team <mev-research@example.com>" \
-      description="Debug Build with Development Tools" \
-      version="1.0.0-debug"
-
-# Switch back to root for installing debug tools
-USER root
-
-# Install debugging tools
-RUN apk add --no-cache \
-        bash \
-        curl \
-        vim \
-        htop \
-        strace \
-        tcpdump \
-        netcat-openbsd \
-        bind-tools && \
-    rm -rf /var/cache/apk/*
-
-# Install development dependencies for debugging
-COPY package*.json ./
-RUN npm install --only=dev && npm cache clean --force
-
-# Copy source maps and source code for debugging
-COPY --from=ts-builder /app/src ./src-debug
-COPY --from=ts-builder /app/tests ./tests-debug
-
-# Switch back to non-root user
+# Switch to application user
 USER mev
 
-# Debug command
-CMD ["node", "--inspect=0.0.0.0:9229", "dist/index.js"]
+# Set entrypoint and default command
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

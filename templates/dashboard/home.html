@@ -1,0 +1,218 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Dashboard - {{ block.super }}{% endblock %}
+
+{% block content %}
+<div class="px-4 py-6 sm:px-0">
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-gray-900">MEV Searcher Dashboard</h1>
+        <p class="mt-2 text-sm text-gray-600">Real-time network monitoring and performance analytics</p>
+    </div>
+
+    <!-- Real-time Metrics Cards -->
+    <div class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+        <!-- TPS Card -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="w-8 h-8 bg-blue-500 rounded-md flex items-center justify-center">
+                            <span class="text-white text-sm font-bold">T</span>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Transactions/sec</dt>
+                            <dd class="text-lg font-medium text-gray-900" id="tps-metric">2,847</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mempool Size Card -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="w-8 h-8 bg-green-500 rounded-md flex items-center justify-center">
+                            <span class="text-white text-sm font-bold">M</span>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Mempool Size</dt>
+                            <dd class="text-lg font-medium text-gray-900" id="mempool-metric">1,234</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MEV Opportunities Card -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="w-8 h-8 bg-yellow-500 rounded-md flex items-center justify-center">
+                            <span class="text-white text-sm font-bold">O</span>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">MEV Opportunities</dt>
+                            <dd class="text-lg font-medium text-gray-900" id="opportunities-metric">23</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Success Rate Card -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="w-8 h-8 bg-red-500 rounded-md flex items-center justify-center">
+                            <span class="text-white text-sm font-bold">S</span>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Success Rate</dt>
+                            <dd class="text-lg font-medium text-gray-900" id="success-rate-metric">94.2%</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+        <!-- Profit/Loss Chart -->
+        <div class="bg-white shadow rounded-lg">
+            <div class="px-4 py-5 sm:p-6">
+                <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4">Profit & Loss (24h)</h3>
+                <canvas id="pnlChart" width="400" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Network Health Chart -->
+        <div class="bg-white shadow rounded-lg">
+            <div class="px-4 py-5 sm:p-6">
+                <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4">Network Health</h3>
+                <canvas id="networkHealthChart" width="400" height="200"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Strategies Table -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4">Active Strategies</h3>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Strategy</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Profit (24h)</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Success Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200" id="strategies-table">
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">Sandwich Attack</td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Active</span>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">+2.45 SOL</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">96.3%</td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">Arbitrage</td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Active</span>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">+1.23 SOL</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">89.7%</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// WebSocket connection for real-time updates
+const dashboardSocket = new WebSocket('ws://' + window.location.host + '/ws/dashboard/');
+
+dashboardSocket.onmessage = function(e) {
+    const data = JSON.parse(e.data);
+    updateDashboardMetrics(data);
+};
+
+dashboardSocket.onclose = function(e) {
+    console.error('Dashboard socket closed unexpectedly');
+};
+
+// Update dashboard metrics
+function updateDashboardMetrics(data) {
+    if (data.type === 'metrics_update') {
+        document.getElementById('tps-metric').textContent = data.data.tps.toLocaleString();
+        document.getElementById('mempool-metric').textContent = data.data.mempool_size.toLocaleString();
+        document.getElementById('opportunities-metric').textContent = data.data.opportunities;
+        document.getElementById('success-rate-metric').textContent = data.data.success_rate + '%';
+    }
+}
+
+// Initialize charts
+document.addEventListener('DOMContentLoaded', function() {
+    // P&L Chart
+    const pnlCtx = document.getElementById('pnlChart').getContext('2d');
+    new Chart(pnlCtx, {
+        type: 'line',
+        data: {
+            labels: Array.from({length: 24}, (_, i) => `${i}:00`),
+            datasets: [{
+                label: 'Profit/Loss (SOL)',
+                data: Array.from({length: 24}, () => Math.random() * 10 - 5),
+                borderColor: 'rgb(59, 130, 246)',
+                backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+        }
+    });
+
+    // Network Health Chart
+    const healthCtx = document.getElementById('networkHealthChart').getContext('2d');
+    new Chart(healthCtx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Healthy', 'Degraded', 'Down'],
+            datasets: [{
+                data: [85, 10, 5],
+                backgroundColor: [
+                    'rgb(34, 197, 94)',
+                    'rgb(251, 191, 36)',
+                    'rgb(239, 68, 68)'
+                ]
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+        }
+    });
+});
+</script>
+{% endblock %}
